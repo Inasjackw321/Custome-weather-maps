@@ -123,28 +123,54 @@ class OpenMeteoClient:
         params = {
             'latitude': lat,
             'longitude': lon,
-            'hourly': [
+            'hourly': ','.join([
                 'temperature_2m',
                 'relative_humidity_2m',
+                'dewpoint_2m',
+                'apparent_temperature',
+                'precipitation_probability',
                 'precipitation',
                 'rain',
                 'showers',
                 'snowfall',
+                'snow_depth',
                 'weather_code',
+                'pressure_msl',
+                'surface_pressure',
+                'cloud_cover',
+                'visibility',
+                'evapotranspiration',
                 'wind_speed_10m',
+                'wind_speed_80m',
+                'wind_direction_10m',
                 'wind_gusts_10m',
                 'cape',
-                'soil_moisture_0_to_7cm'
-            ],
-            'daily': [
+                'lifted_index',
+                'convective_inhibition',
+                'freezing_level_height',
+                'soil_temperature_0cm',
+                'soil_moisture_0_to_1cm',
+                'soil_moisture_1_to_3cm',
+                'soil_moisture_3_to_9cm',
+                'soil_moisture_9_to_27cm'
+            ]),
+            'daily': ','.join([
+                'weather_code',
                 'temperature_2m_max',
                 'temperature_2m_min',
+                'apparent_temperature_max',
+                'apparent_temperature_min',
                 'precipitation_sum',
                 'rain_sum',
+                'showers_sum',
+                'snowfall_sum',
                 'precipitation_hours',
+                'precipitation_probability_max',
                 'wind_speed_10m_max',
-                'wind_gusts_10m_max'
-            ],
+                'wind_gusts_10m_max',
+                'wind_direction_10m_dominant',
+                'et0_fao_evapotranspiration'
+            ]),
             'timezone': 'UTC',
             'forecast_days': 3
         }
@@ -204,11 +230,36 @@ class RiskCalculator:
     """Calculate weather risk indices from meteorological data."""
 
     @staticmethod
+    def _safe_max(values, default=0):
+        """Safely get max from list, handling None values."""
+        filtered = [v for v in values if v is not None]
+        return max(filtered) if filtered else default
+
+    @staticmethod
+    def _safe_min(values, default=0):
+        """Safely get min from list, handling None values."""
+        filtered = [v for v in values if v is not None]
+        return min(filtered) if filtered else default
+
+    @staticmethod
+    def _safe_mean(values, default=0):
+        """Safely get mean from list, handling None values."""
+        filtered = [v for v in values if v is not None]
+        return sum(filtered) / len(filtered) if filtered else default
+
+    @staticmethod
     def calculate_severe_weather_risk(data: Dict) -> int:
         """
         Calculate severe weather risk (0-5) based on convective parameters.
 
-        Uses: CAPE, wind gusts, precipitation intensity, weather codes
+        Uses advanced meteorological indices:
+        - CAPE (Convective Available Potential Energy)
+        - Lifted Index (atmospheric stability)
+        - CIN (Convective Inhibition)
+        - Wind shear (10m vs 80m winds)
+        - Wind gusts
+        - Precipitation intensity
+        - Weather codes for active thunderstorms
 
         Categories:
         0 - None: No severe weather expected
@@ -223,61 +274,130 @@ class RiskCalculator:
 
         hourly = data['hourly']
 
-        # Get maximum values for key parameters (next 24 hours)
+        # Get values for next 24 hours
         cape_values = hourly.get('cape', [0])[:24]
+        li_values = hourly.get('lifted_index', [0])[:24]
+        cin_values = hourly.get('convective_inhibition', [0])[:24]
+        wind_10m = hourly.get('wind_speed_10m', [0])[:24]
+        wind_80m = hourly.get('wind_speed_80m', [0])[:24]
         wind_gust_values = hourly.get('wind_gusts_10m', [0])[:24]
         precip_values = hourly.get('precipitation', [0])[:24]
         weather_codes = hourly.get('weather_code', [0])[:24]
+        precip_prob = hourly.get('precipitation_probability', [0])[:24]
 
-        # Handle None values
-        cape_max = max([v for v in cape_values if v is not None] or [0])
-        gust_max = max([v for v in wind_gust_values if v is not None] or [0])
-        precip_max = max([v for v in precip_values if v is not None] or [0])
+        # Calculate key parameters
+        cape_max = RiskCalculator._safe_max(cape_values, 0)
+        li_min = RiskCalculator._safe_min(li_values, 10)  # Lower LI = more unstable
+        cin_min = RiskCalculator._safe_min(cin_values, 0)  # Less negative CIN = easier triggering
+        gust_max = RiskCalculator._safe_max(wind_gust_values, 0)
+        precip_max = RiskCalculator._safe_max(precip_values, 0)
+        precip_prob_max = RiskCalculator._safe_max(precip_prob, 0)
 
-        # Check for thunderstorm weather codes (95-99)
+        # Calculate wind shear (difference between 80m and 10m winds)
+        shear_values = []
+        for w10, w80 in zip(wind_10m, wind_80m):
+            if w10 is not None and w80 is not None:
+                shear_values.append(abs(w80 - w10))
+        wind_shear = max(shear_values) if shear_values else 0
+
+        # Check for severe weather codes
+        # 95: Slight thunderstorm, 96: Thunderstorm with hail, 99: Heavy thunderstorm with hail
         has_thunderstorm = any(95 <= (c or 0) <= 99 for c in weather_codes)
+        has_severe_ts = any((c or 0) in [96, 99] for c in weather_codes)
 
-        # Calculate component scores
+        # === CAPE Score (0-5) ===
+        # Based on SPC thresholds
         cape_score = 0
-        if cape_max > 3000:
+        if cape_max >= 4000:
             cape_score = 5
-        elif cape_max > 2000:
+        elif cape_max >= 2500:
             cape_score = 4
-        elif cape_max > 1000:
+        elif cape_max >= 1500:
             cape_score = 3
-        elif cape_max > 500:
+        elif cape_max >= 1000:
             cape_score = 2
-        elif cape_max > 100:
+        elif cape_max >= 500:
             cape_score = 1
 
+        # === Lifted Index Score (0-5) ===
+        # Negative LI indicates instability
+        li_score = 0
+        if li_min <= -8:
+            li_score = 5
+        elif li_min <= -6:
+            li_score = 4
+        elif li_min <= -4:
+            li_score = 3
+        elif li_min <= -2:
+            li_score = 2
+        elif li_min <= 0:
+            li_score = 1
+
+        # === Wind Shear Score (0-5) ===
+        shear_score = 0
+        if wind_shear >= 25:  # Strong shear favors supercells
+            shear_score = 5
+        elif wind_shear >= 20:
+            shear_score = 4
+        elif wind_shear >= 15:
+            shear_score = 3
+        elif wind_shear >= 10:
+            shear_score = 2
+        elif wind_shear >= 5:
+            shear_score = 1
+
+        # === Wind Gust Score (0-5) ===
         gust_score = 0
-        if gust_max > 130:  # km/h
+        if gust_max >= 120:  # Hurricane force
             gust_score = 5
-        elif gust_max > 100:
+        elif gust_max >= 90:  # Severe
             gust_score = 4
-        elif gust_max > 75:
+        elif gust_max >= 70:
             gust_score = 3
-        elif gust_max > 50:
+        elif gust_max >= 50:
             gust_score = 2
-        elif gust_max > 30:
+        elif gust_max >= 35:
             gust_score = 1
 
+        # === Precipitation Intensity Score (0-4) ===
         precip_score = 0
-        if precip_max > 50:  # mm/hr
+        if precip_max >= 40:
             precip_score = 4
-        elif precip_max > 25:
+        elif precip_max >= 20:
             precip_score = 3
-        elif precip_max > 10:
+        elif precip_max >= 10:
             precip_score = 2
-        elif precip_max > 2:
+        elif precip_max >= 3:
             precip_score = 1
 
-        # Combine scores with weighting
-        combined_score = (cape_score * 0.4 + gust_score * 0.35 + precip_score * 0.25)
+        # === CIN Modifier ===
+        # CIN between -50 and 0 is ideal for severe weather (cap that can break)
+        cin_modifier = 1.0
+        if -100 <= cin_min <= -25:
+            cin_modifier = 1.15  # "Loaded gun" scenario
+        elif cin_min > -25:
+            cin_modifier = 1.0  # Too weak cap
+        elif cin_min < -200:
+            cin_modifier = 0.7  # Cap too strong
+
+        # Combine scores with meteorological weighting
+        combined_score = (
+            cape_score * 0.30 +
+            li_score * 0.20 +
+            shear_score * 0.20 +
+            gust_score * 0.20 +
+            precip_score * 0.10
+        ) * cin_modifier
 
         # Bonus for active thunderstorms
-        if has_thunderstorm:
+        if has_severe_ts:
+            combined_score += 1.0
+        elif has_thunderstorm:
             combined_score += 0.5
+
+        # High precipitation probability increases confidence
+        if precip_prob_max >= 80:
+            combined_score *= 1.1
 
         # Convert to category
         if combined_score >= 4.0:
@@ -296,9 +416,15 @@ class RiskCalculator:
     @staticmethod
     def calculate_flood_risk(data: Dict) -> int:
         """
-        Calculate flooding risk (0-4) based on precipitation and soil moisture.
+        Calculate flooding risk (0-4) based on precipitation and soil conditions.
 
-        Uses: Precipitation totals, precipitation duration, soil moisture
+        Uses advanced hydrological factors:
+        - Precipitation totals (daily and 3-day)
+        - Precipitation intensity (hourly rates)
+        - Precipitation duration
+        - Soil moisture at multiple depths
+        - Precipitation probability
+        - Antecedent conditions
 
         Categories:
         0 - None: No flooding expected
@@ -317,49 +443,102 @@ class RiskCalculator:
         precip_sum = daily.get('precipitation_sum', [0])[:3]
         precip_hours = daily.get('precipitation_hours', [0])[:3]
         rain_sum = daily.get('rain_sum', [0])[:3]
+        showers_sum = daily.get('showers_sum', [0])[:3]
+        precip_prob = daily.get('precipitation_probability_max', [0])[:3]
 
-        # Get hourly precipitation for intensity
+        # Get hourly data
         hourly_precip = hourly.get('precipitation', [0])[:72]
-        soil_moisture = hourly.get('soil_moisture_0_to_7cm', [0.3])[:24]
+        hourly_rain = hourly.get('rain', [0])[:72]
+        hourly_showers = hourly.get('showers', [0])[:72]
 
-        # Handle None values
+        # Soil moisture at multiple depths
+        soil_0_1 = hourly.get('soil_moisture_0_to_1cm', [0.3])[:24]
+        soil_1_3 = hourly.get('soil_moisture_1_to_3cm', [0.3])[:24]
+        soil_3_9 = hourly.get('soil_moisture_3_to_9cm', [0.3])[:24]
+        soil_9_27 = hourly.get('soil_moisture_9_to_27cm', [0.3])[:24]
+
+        # Calculate key metrics
         total_precip = sum([v for v in precip_sum if v is not None] or [0])
-        max_daily_precip = max([v for v in precip_sum if v is not None] or [0])
+        max_daily_precip = RiskCalculator._safe_max(precip_sum, 0)
         total_hours = sum([v for v in precip_hours if v is not None] or [0])
-        max_hourly = max([v for v in hourly_precip if v is not None] or [0])
-        avg_soil_moisture = np.mean([v for v in soil_moisture if v is not None] or [0.3])
+        max_hourly = RiskCalculator._safe_max(hourly_precip, 0)
+        precip_prob_max = RiskCalculator._safe_max(precip_prob, 0)
 
-        # Precipitation volume score
+        # Calculate average soil moisture across depths
+        avg_soil_surface = RiskCalculator._safe_mean(soil_0_1, 0.3)
+        avg_soil_shallow = RiskCalculator._safe_mean(soil_1_3, 0.3)
+        avg_soil_mid = RiskCalculator._safe_mean(soil_3_9, 0.3)
+        avg_soil_deep = RiskCalculator._safe_mean(soil_9_27, 0.3)
+
+        # Weighted soil moisture (surface matters most for runoff)
+        weighted_soil = (avg_soil_surface * 0.4 + avg_soil_shallow * 0.3 +
+                         avg_soil_mid * 0.2 + avg_soil_deep * 0.1)
+
+        # Calculate 6-hour rainfall accumulations for flash flood potential
+        six_hour_totals = []
+        for i in range(0, min(48, len(hourly_precip)), 6):
+            chunk = hourly_precip[i:i+6]
+            total = sum([v for v in chunk if v is not None] or [0])
+            six_hour_totals.append(total)
+        max_6hr = max(six_hour_totals) if six_hour_totals else 0
+
+        # === Precipitation Volume Score (0-4) ===
         precip_score = 0
-        if total_precip > 150:
+        if total_precip >= 125:
             precip_score = 4
-        elif total_precip > 100:
+        elif total_precip >= 75:
             precip_score = 3
-        elif total_precip > 50:
+        elif total_precip >= 40:
             precip_score = 2
-        elif total_precip > 25:
+        elif total_precip >= 20:
             precip_score = 1
 
-        # Intensity score (flash flood potential)
+        # === Flash Flood Intensity Score (0-4) ===
+        # Based on hourly and 6-hour rates
         intensity_score = 0
-        if max_hourly > 50:
+        if max_hourly >= 40 or max_6hr >= 75:
             intensity_score = 4
-        elif max_hourly > 30:
+        elif max_hourly >= 25 or max_6hr >= 50:
             intensity_score = 3
-        elif max_hourly > 15:
+        elif max_hourly >= 12 or max_6hr >= 30:
             intensity_score = 2
-        elif max_hourly > 5:
+        elif max_hourly >= 5 or max_6hr >= 15:
             intensity_score = 1
 
-        # Soil saturation modifier
+        # === Duration Score (0-3) ===
+        # Prolonged rain increases flood risk
+        duration_score = 0
+        if total_hours >= 36:
+            duration_score = 3
+        elif total_hours >= 24:
+            duration_score = 2
+        elif total_hours >= 12:
+            duration_score = 1
+
+        # === Soil Saturation Modifier ===
+        # Saturated soils = more runoff
         saturation_modifier = 1.0
-        if avg_soil_moisture > 0.4:
+        if weighted_soil >= 0.45:
+            saturation_modifier = 1.5  # Near saturated
+        elif weighted_soil >= 0.38:
             saturation_modifier = 1.3
-        elif avg_soil_moisture > 0.35:
+        elif weighted_soil >= 0.32:
             saturation_modifier = 1.15
+        elif weighted_soil <= 0.15:
+            saturation_modifier = 0.7  # Very dry, high infiltration
 
         # Combined score
-        combined_score = (precip_score * 0.5 + intensity_score * 0.5) * saturation_modifier
+        combined_score = (
+            precip_score * 0.40 +
+            intensity_score * 0.35 +
+            duration_score * 0.25
+        ) * saturation_modifier
+
+        # Probability confidence boost
+        if precip_prob_max >= 90:
+            combined_score *= 1.1
+        elif precip_prob_max < 40:
+            combined_score *= 0.8
 
         # Convert to category
         if combined_score >= 3.5:
@@ -376,9 +555,17 @@ class RiskCalculator:
     @staticmethod
     def calculate_fire_risk(data: Dict) -> int:
         """
-        Calculate fire weather risk (0-4) based on temperature, humidity, wind, and precipitation.
+        Calculate fire weather risk (0-4) based on the Fosberg Fire Weather Index approach.
 
-        Uses: Temperature, relative humidity, wind speed/gusts, precipitation history
+        Uses comprehensive fire weather parameters:
+        - Temperature (affects fuel moisture)
+        - Relative humidity (critical for fire spread)
+        - Dewpoint depression (temperature - dewpoint)
+        - Wind speed and gusts (fire spread rate)
+        - Evapotranspiration (drying potential)
+        - Soil moisture (fuel moisture proxy)
+        - Recent precipitation (wetting factor)
+        - Visibility (smoke/haze indicator)
 
         Categories:
         0 - None: No significant fire weather
@@ -393,65 +580,148 @@ class RiskCalculator:
         hourly = data['hourly']
         daily = data.get('daily', {})
 
-        # Get relevant parameters
+        # Get hourly parameters
         temp_values = hourly.get('temperature_2m', [20])[:24]
+        dewpoint_values = hourly.get('dewpoint_2m', [10])[:24]
         rh_values = hourly.get('relative_humidity_2m', [50])[:24]
-        wind_values = hourly.get('wind_speed_10m', [10])[:24]
+        wind_10m = hourly.get('wind_speed_10m', [10])[:24]
+        wind_80m = hourly.get('wind_speed_80m', [15])[:24]
         gust_values = hourly.get('wind_gusts_10m', [15])[:24]
-        precip_values = daily.get('precipitation_sum', [0])[:3]
-        soil_moisture = hourly.get('soil_moisture_0_to_7cm', [0.3])[:24]
+        evap_values = hourly.get('evapotranspiration', [0])[:24]
+        soil_temp = hourly.get('soil_temperature_0cm', [20])[:24]
 
-        # Handle None values and calculate statistics
-        max_temp = max([v for v in temp_values if v is not None] or [20])
-        min_rh = min([v for v in rh_values if v is not None] or [50])
-        max_wind = max([v for v in wind_values if v is not None] or [10])
-        max_gust = max([v for v in gust_values if v is not None] or [15])
-        total_precip = sum([v for v in precip_values if v is not None] or [0])
-        avg_soil = np.mean([v for v in soil_moisture if v is not None] or [0.3])
+        # Soil moisture at multiple depths
+        soil_0_1 = hourly.get('soil_moisture_0_to_1cm', [0.3])[:24]
+        soil_1_3 = hourly.get('soil_moisture_1_to_3cm', [0.3])[:24]
+        soil_3_9 = hourly.get('soil_moisture_3_to_9cm', [0.3])[:24]
 
-        # Temperature score (hot and dry conditions)
+        # Daily parameters
+        precip_sum = daily.get('precipitation_sum', [0])[:3]
+        et0_values = daily.get('et0_fao_evapotranspiration', [0])[:3]
+
+        # Calculate key metrics
+        max_temp = RiskCalculator._safe_max(temp_values, 20)
+        min_rh = RiskCalculator._safe_min(rh_values, 50)
+        mean_rh = RiskCalculator._safe_mean(rh_values, 50)
+        max_wind = RiskCalculator._safe_max(wind_10m, 10)
+        max_gust = RiskCalculator._safe_max(gust_values, 15)
+        total_precip = sum([v for v in precip_sum if v is not None] or [0])
+        total_et0 = sum([v for v in et0_values if v is not None] or [0])
+
+        # Calculate dewpoint depression (indicates how dry air is)
+        dewpoint_depressions = []
+        for t, d in zip(temp_values, dewpoint_values):
+            if t is not None and d is not None:
+                dewpoint_depressions.append(t - d)
+        max_dewpoint_depression = max(dewpoint_depressions) if dewpoint_depressions else 10
+
+        # Surface soil moisture (most relevant for fine fuels)
+        avg_surface_soil = RiskCalculator._safe_mean(soil_0_1, 0.3)
+        avg_shallow_soil = RiskCalculator._safe_mean(soil_1_3, 0.3)
+        fuel_moisture_proxy = (avg_surface_soil * 0.7 + avg_shallow_soil * 0.3)
+
+        # Calculate wind transport factor (80m winds indicate mixing potential)
+        wind_transport = RiskCalculator._safe_max(wind_80m, 15)
+
+        # === Temperature Score (0-4) ===
         temp_score = 0
-        if max_temp > 40:
+        if max_temp >= 42:
             temp_score = 4
-        elif max_temp > 35:
+        elif max_temp >= 38:
             temp_score = 3
-        elif max_temp > 30:
+        elif max_temp >= 32:
             temp_score = 2
-        elif max_temp > 25:
+        elif max_temp >= 27:
             temp_score = 1
 
-        # Humidity score (low humidity = high fire risk)
+        # === Relative Humidity Score (0-4) ===
+        # Low RH is critical for fire weather
         rh_score = 0
-        if min_rh < 10:
+        if min_rh <= 8:
             rh_score = 4
-        elif min_rh < 15:
+        elif min_rh <= 12:
             rh_score = 3
-        elif min_rh < 25:
+        elif min_rh <= 20:
             rh_score = 2
-        elif min_rh < 35:
+        elif min_rh <= 30:
             rh_score = 1
 
-        # Wind score
+        # === Dewpoint Depression Score (0-4) ===
+        # Large depression = very dry air mass
+        dd_score = 0
+        if max_dewpoint_depression >= 25:
+            dd_score = 4
+        elif max_dewpoint_depression >= 20:
+            dd_score = 3
+        elif max_dewpoint_depression >= 15:
+            dd_score = 2
+        elif max_dewpoint_depression >= 10:
+            dd_score = 1
+
+        # === Wind Score (0-4) ===
+        # Use combination of sustained and gusts
+        effective_wind = max_wind * 0.6 + max_gust * 0.4
         wind_score = 0
-        effective_wind = max(max_wind, max_gust * 0.7)
-        if effective_wind > 80:
+        if effective_wind >= 70:
             wind_score = 4
-        elif effective_wind > 50:
+        elif effective_wind >= 50:
             wind_score = 3
-        elif effective_wind > 30:
+        elif effective_wind >= 35:
             wind_score = 2
-        elif effective_wind > 15:
+        elif effective_wind >= 20:
             wind_score = 1
 
-        # Drought modifier (low soil moisture and no recent precip)
-        drought_modifier = 1.0
-        if total_precip < 1 and avg_soil < 0.2:
-            drought_modifier = 1.4
-        elif total_precip < 5 and avg_soil < 0.25:
-            drought_modifier = 1.2
+        # === Mixing/Transport Score (0-3) ===
+        # Strong upper winds bring dry air down
+        transport_score = 0
+        if wind_transport >= 50:
+            transport_score = 3
+        elif wind_transport >= 35:
+            transport_score = 2
+        elif wind_transport >= 25:
+            transport_score = 1
 
-        # Combined score with weighting
-        combined_score = (temp_score * 0.25 + rh_score * 0.35 + wind_score * 0.4) * drought_modifier
+        # === Drought/Fuel Moisture Modifier ===
+        drought_modifier = 1.0
+        if fuel_moisture_proxy <= 0.10:
+            drought_modifier = 1.6  # Extremely dry fuels
+        elif fuel_moisture_proxy <= 0.15:
+            drought_modifier = 1.4
+        elif fuel_moisture_proxy <= 0.20:
+            drought_modifier = 1.2
+        elif fuel_moisture_proxy >= 0.40:
+            drought_modifier = 0.6  # Moist conditions
+
+        # === Recent Precipitation Modifier ===
+        precip_modifier = 1.0
+        if total_precip >= 25:
+            precip_modifier = 0.4  # Significant wetting
+        elif total_precip >= 10:
+            precip_modifier = 0.6
+        elif total_precip >= 5:
+            precip_modifier = 0.8
+        elif total_precip < 1:
+            precip_modifier = 1.1  # No wetting
+
+        # === Evapotranspiration Bonus ===
+        # High ET = strong drying conditions
+        et_bonus = 0
+        if total_et0 >= 20:
+            et_bonus = 0.5
+        elif total_et0 >= 15:
+            et_bonus = 0.3
+        elif total_et0 >= 10:
+            et_bonus = 0.15
+
+        # Combined score using fire weather index approach
+        combined_score = (
+            temp_score * 0.15 +
+            rh_score * 0.30 +
+            dd_score * 0.10 +
+            wind_score * 0.30 +
+            transport_score * 0.15 +
+            et_bonus
+        ) * drought_modifier * precip_modifier
 
         # Convert to category
         if combined_score >= 3.5:
@@ -606,6 +876,20 @@ class WeatherMapGenerator:
         plt.figtext(0.99, 0.01, 'Data: Open-Meteo API',
                     ha='right', fontsize=8, style='italic', alpha=0.7)
 
+        # Add Kaldock watermark
+        plt.figtext(0.5, 0.5, 'Kaldock',
+                    ha='center', va='center',
+                    fontsize=72, fontweight='bold',
+                    color='gray', alpha=0.15,
+                    rotation=30,
+                    transform=fig.transFigure,
+                    zorder=1)
+
+        # Add Kaldock branding in corner
+        plt.figtext(0.01, 0.01, 'Created by Kaldock',
+                    ha='left', fontsize=9, fontweight='bold',
+                    color='#333333', alpha=0.8)
+
         # Save figure
         filename = f"{region_key}_{risk_type}_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.png"
         filepath = os.path.join(self.output_dir, filename)
@@ -680,7 +964,7 @@ class WeatherMapGenerator:
         return output_files
 
     def _generate_sample_data(self, bounds: List[float], resolution: float) -> Dict:
-        """Generate sample/demo data for testing without API calls."""
+        """Generate comprehensive sample/demo data for testing without API calls."""
         lon_min, lon_max, lat_min, lat_max = bounds
 
         lons = np.arange(lon_min, lon_max + resolution, resolution)
@@ -692,38 +976,108 @@ class WeatherMapGenerator:
             'data': {}
         }
 
-        # Generate synthetic weather data
+        # Generate synthetic weather data with realistic patterns
         np.random.seed(42)  # For reproducibility
 
         for lat in lats:
             for lon in lons:
                 # Create synthetic but realistic-looking weather patterns
-                lat_factor = (lat - lat_min) / (lat_max - lat_min)
-                lon_factor = (lon - lon_min) / (lon_max - lon_min)
+                lat_factor = (lat - lat_min) / (lat_max - lat_min) if lat_max != lat_min else 0.5
+                lon_factor = (lon - lon_min) / (lon_max - lon_min) if lon_max != lon_min else 0.5
 
                 # Add some spatial correlation and randomness
                 noise = np.random.random()
+                noise2 = np.random.random()
                 pattern = np.sin(lat_factor * np.pi) * np.cos(lon_factor * np.pi * 2)
+                storm_pattern = np.sin((lat_factor + lon_factor) * np.pi * 1.5) * noise
+
+                # Temperature based on latitude (warmer in south for northern hemisphere)
+                base_temp = 15 + 25 * (1 - lat_factor) + 5 * noise
+                dewpoint = base_temp - 5 - 15 * noise2
+
+                # Humidity inversely related to temperature
+                base_rh = max(10, 80 - 50 * lat_factor - 20 * noise)
+
+                # Wind patterns
+                wind_10m = 8 + 25 * noise * abs(pattern)
+                wind_80m = wind_10m * (1.3 + 0.4 * noise2)
+                wind_gust = wind_10m * (1.5 + 0.5 * noise)
+
+                # Precipitation pattern
+                precip = max(0, 8 * (noise + pattern * 0.3))
+                precip_prob = min(100, max(0, 30 + 60 * storm_pattern))
+
+                # Soil moisture (drier in warm areas)
+                soil_base = 0.35 - 0.2 * lat_factor + 0.1 * noise
+
+                # CAPE and instability
+                cape = max(0, 500 + 3000 * storm_pattern * noise)
+                lifted_index = 2 - 8 * storm_pattern * noise
+                cin = -50 - 100 * noise2
 
                 grid_data['data'][(lat, lon)] = {
                     'hourly': {
-                        'cape': [max(0, 500 + 2500 * (pattern + noise * 0.5))] * 24,
-                        'wind_gusts_10m': [max(0, 20 + 80 * noise * abs(pattern))] * 24,
-                        'precipitation': [max(0, 5 * (noise + pattern * 0.3))] * 24,
-                        'weather_code': [int(95 * noise) if noise > 0.7 else int(3 * noise)] * 24,
-                        'temperature_2m': [15 + 25 * lat_factor + 5 * noise] * 24,
-                        'relative_humidity_2m': [30 + 40 * (1 - lat_factor) + 20 * noise] * 24,
-                        'wind_speed_10m': [10 + 30 * noise * abs(pattern)] * 24,
-                        'soil_moisture_0_to_7cm': [0.2 + 0.2 * (1 - noise)] * 24,
+                        # Temperature and moisture
+                        'temperature_2m': [base_temp + 3 * np.sin(h * np.pi / 12) for h in range(24)],
+                        'dewpoint_2m': [dewpoint + 1 * np.sin(h * np.pi / 12) for h in range(24)],
+                        'relative_humidity_2m': [max(10, base_rh - 10 * np.sin(h * np.pi / 12)) for h in range(24)],
+                        'apparent_temperature': [base_temp + 2 + 3 * np.sin(h * np.pi / 12) for h in range(24)],
+
+                        # Precipitation
+                        'precipitation': [max(0, precip * (0.5 + 0.5 * np.random.random())) for _ in range(24)],
+                        'rain': [max(0, precip * 0.8 * (0.5 + 0.5 * np.random.random())) for _ in range(24)],
+                        'showers': [max(0, precip * 0.2 * np.random.random()) for _ in range(24)],
+                        'precipitation_probability': [precip_prob] * 24,
+
+                        # Wind
+                        'wind_speed_10m': [wind_10m * (0.8 + 0.4 * np.random.random()) for _ in range(24)],
+                        'wind_speed_80m': [wind_80m * (0.8 + 0.4 * np.random.random()) for _ in range(24)],
+                        'wind_gusts_10m': [wind_gust * (0.8 + 0.4 * np.random.random()) for _ in range(24)],
+                        'wind_direction_10m': [int(180 + 90 * np.sin(h * np.pi / 6)) for h in range(24)],
+
+                        # Convective parameters
+                        'cape': [cape * (0.8 + 0.4 * np.random.random()) for _ in range(24)],
+                        'lifted_index': [lifted_index + 2 * np.random.random() for _ in range(24)],
+                        'convective_inhibition': [cin * (0.8 + 0.4 * np.random.random()) for _ in range(24)],
+
+                        # Weather codes (thunderstorm codes 95-99)
+                        'weather_code': [95 if storm_pattern > 0.5 and np.random.random() > 0.7 else int(3 * noise) for _ in range(24)],
+
+                        # Pressure and visibility
+                        'pressure_msl': [1013 + 10 * pattern] * 24,
+                        'surface_pressure': [1010 + 10 * pattern] * 24,
+                        'visibility': [max(1000, 20000 - 15000 * precip / 10)] * 24,
+                        'cloud_cover': [min(100, max(0, 20 + 60 * storm_pattern + 20 * noise))] * 24,
+
+                        # Soil parameters
+                        'soil_moisture_0_to_1cm': [max(0.05, soil_base * (0.8 + 0.4 * np.random.random()))] * 24,
+                        'soil_moisture_1_to_3cm': [max(0.05, soil_base * 1.05 * (0.9 + 0.2 * np.random.random()))] * 24,
+                        'soil_moisture_3_to_9cm': [max(0.05, soil_base * 1.1 * (0.9 + 0.2 * np.random.random()))] * 24,
+                        'soil_moisture_9_to_27cm': [max(0.05, soil_base * 1.15 * (0.9 + 0.2 * np.random.random()))] * 24,
+                        'soil_temperature_0cm': [base_temp - 2 + 5 * np.sin(h * np.pi / 12) for h in range(24)],
+
+                        # Evapotranspiration
+                        'evapotranspiration': [max(0, 0.2 + 0.3 * lat_factor * (0.5 + 0.5 * np.random.random()))] * 24,
+                        'freezing_level_height': [max(0, 3000 + 1500 * lat_factor)] * 24,
+                        'snowfall': [0] * 24,
+                        'snow_depth': [0] * 24,
                     },
                     'daily': {
-                        'precipitation_sum': [10 + 50 * noise * abs(pattern)] * 3,
-                        'precipitation_hours': [int(5 + 10 * noise)] * 3,
-                        'rain_sum': [8 + 40 * noise * abs(pattern)] * 3,
-                        'temperature_2m_max': [20 + 20 * lat_factor] * 3,
-                        'temperature_2m_min': [10 + 10 * lat_factor] * 3,
-                        'wind_speed_10m_max': [15 + 40 * noise] * 3,
-                        'wind_gusts_10m_max': [25 + 60 * noise] * 3,
+                        'weather_code': [95 if storm_pattern > 0.5 else int(3 * noise)] * 3,
+                        'temperature_2m_max': [base_temp + 8] * 3,
+                        'temperature_2m_min': [base_temp - 5] * 3,
+                        'apparent_temperature_max': [base_temp + 10] * 3,
+                        'apparent_temperature_min': [base_temp - 7] * 3,
+                        'precipitation_sum': [max(0, precip * 12 * (0.5 + 0.5 * np.random.random())) for _ in range(3)],
+                        'rain_sum': [max(0, precip * 10 * (0.5 + 0.5 * np.random.random())) for _ in range(3)],
+                        'showers_sum': [max(0, precip * 2 * np.random.random()) for _ in range(3)],
+                        'snowfall_sum': [0] * 3,
+                        'precipitation_hours': [int(6 + 12 * storm_pattern * noise)] * 3,
+                        'precipitation_probability_max': [precip_prob] * 3,
+                        'wind_speed_10m_max': [wind_gust * 0.9] * 3,
+                        'wind_gusts_10m_max': [wind_gust * 1.2] * 3,
+                        'wind_direction_10m_dominant': [int(180 + 90 * pattern)] * 3,
+                        'et0_fao_evapotranspiration': [max(0, 3 + 5 * lat_factor * noise)] * 3,
                     }
                 }
 
