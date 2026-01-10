@@ -14,6 +14,7 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import matplotlib.patches as mpatches
 from matplotlib.colors import LinearSegmentedColormap, BoundaryNorm
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 from cartopy.mpl.gridliner import LONGITUDE_FORMATTER, LATITUDE_FORMATTER
@@ -21,10 +22,20 @@ import requests
 from scipy.interpolate import griddata
 from datetime import datetime, timedelta
 import os
+import sys
+import threading
 from typing import Dict, List, Tuple, Optional
 import warnings
 
 warnings.filterwarnings('ignore')
+
+# Import tkinter
+try:
+    import tkinter as tk
+    from tkinter import ttk, filedialog, messagebox
+    HAS_TK = True
+except ImportError:
+    HAS_TK = False
 
 
 # =============================================================================
@@ -737,6 +748,456 @@ class WeatherMapGenerator:
 
 
 # =============================================================================
+# GRAPHICAL USER INTERFACE
+# =============================================================================
+
+class WeatherMapGUI:
+    """Graphical User Interface for Weather Risk Maps Generator."""
+
+    def __init__(self):
+        if not HAS_TK:
+            raise ImportError("tkinter is required for GUI mode")
+
+        self.root = tk.Tk()
+        self.root.title("Weather Risk Maps Generator")
+        self.root.geometry("1200x800")
+        self.root.minsize(900, 600)
+
+        # Set icon and styling
+        self.style = ttk.Style()
+        self.style.theme_use('clam')
+
+        # Configure custom styles
+        self.style.configure('Title.TLabel', font=('Helvetica', 16, 'bold'))
+        self.style.configure('Header.TLabel', font=('Helvetica', 11, 'bold'))
+        self.style.configure('Status.TLabel', font=('Helvetica', 9))
+        self.style.configure('Generate.TButton', font=('Helvetica', 11, 'bold'), padding=10)
+
+        # Variables
+        self.selected_region = tk.StringVar(value='us')
+        self.selected_risk = tk.StringVar(value='all')
+        self.use_demo_data = tk.BooleanVar(value=True)
+        self.output_dir = tk.StringVar(value=os.path.join(os.getcwd(), 'output'))
+        self.is_generating = False
+        self.current_maps = {}
+
+        # Generator
+        self.generator = None
+
+        # Build UI
+        self._build_ui()
+
+        # Center window
+        self._center_window()
+
+    def _center_window(self):
+        """Center the window on screen."""
+        self.root.update_idletasks()
+        width = self.root.winfo_width()
+        height = self.root.winfo_height()
+        x = (self.root.winfo_screenwidth() // 2) - (width // 2)
+        y = (self.root.winfo_screenheight() // 2) - (height // 2)
+        self.root.geometry(f'{width}x{height}+{x}+{y}')
+
+    def _build_ui(self):
+        """Build the main user interface."""
+        # Main container
+        main_frame = ttk.Frame(self.root, padding="10")
+        main_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Left panel - Controls
+        left_panel = ttk.Frame(main_frame, width=300)
+        left_panel.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
+        left_panel.pack_propagate(False)
+
+        # Right panel - Map preview
+        right_panel = ttk.Frame(main_frame)
+        right_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        self._build_control_panel(left_panel)
+        self._build_preview_panel(right_panel)
+        self._build_status_bar()
+
+    def _build_control_panel(self, parent):
+        """Build the control panel with options."""
+        # Title
+        title_label = ttk.Label(parent, text="Weather Risk Maps", style='Title.TLabel')
+        title_label.pack(pady=(0, 20))
+
+        # Region Selection
+        region_frame = ttk.LabelFrame(parent, text="Region", padding="10")
+        region_frame.pack(fill=tk.X, pady=(0, 10))
+
+        regions = [
+            ('us', 'United States', 'Continental US with state boundaries'),
+            ('australia', 'Australia', 'Full continental coverage'),
+            ('europe', 'Europe', 'Western to Eastern Europe')
+        ]
+
+        for value, name, desc in regions:
+            rb = ttk.Radiobutton(region_frame, text=name, value=value,
+                                  variable=self.selected_region)
+            rb.pack(anchor=tk.W)
+            desc_label = ttk.Label(region_frame, text=f"  {desc}",
+                                    font=('Helvetica', 8), foreground='gray')
+            desc_label.pack(anchor=tk.W)
+
+        # Risk Type Selection
+        risk_frame = ttk.LabelFrame(parent, text="Risk Type", padding="10")
+        risk_frame.pack(fill=tk.X, pady=(0, 10))
+
+        risks = [
+            ('all', 'All Risk Types'),
+            ('severe', 'Severe Weather (5 categories)'),
+            ('flood', 'Flooding Risk (4 categories)'),
+            ('fire', 'Fire Weather (4 categories)')
+        ]
+
+        for value, name in risks:
+            rb = ttk.Radiobutton(risk_frame, text=name, value=value,
+                                  variable=self.selected_risk)
+            rb.pack(anchor=tk.W, pady=2)
+
+        # Data Source
+        data_frame = ttk.LabelFrame(parent, text="Data Source", padding="10")
+        data_frame.pack(fill=tk.X, pady=(0, 10))
+
+        demo_cb = ttk.Checkbutton(data_frame, text="Use Demo Data (faster)",
+                                   variable=self.use_demo_data)
+        demo_cb.pack(anchor=tk.W)
+
+        demo_desc = ttk.Label(data_frame,
+                               text="Uncheck to fetch live data from Open-Meteo API\n(requires internet, may take several minutes)",
+                               font=('Helvetica', 8), foreground='gray')
+        demo_desc.pack(anchor=tk.W, pady=(5, 0))
+
+        # Output Directory
+        output_frame = ttk.LabelFrame(parent, text="Output Directory", padding="10")
+        output_frame.pack(fill=tk.X, pady=(0, 10))
+
+        dir_frame = ttk.Frame(output_frame)
+        dir_frame.pack(fill=tk.X)
+
+        dir_entry = ttk.Entry(dir_frame, textvariable=self.output_dir, width=25)
+        dir_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        browse_btn = ttk.Button(dir_frame, text="Browse", command=self._browse_output)
+        browse_btn.pack(side=tk.LEFT, padx=(5, 0))
+
+        # Generate Button
+        self.generate_btn = ttk.Button(parent, text="Generate Maps",
+                                        style='Generate.TButton',
+                                        command=self._generate_maps)
+        self.generate_btn.pack(fill=tk.X, pady=(20, 10))
+
+        # Progress
+        self.progress_frame = ttk.Frame(parent)
+        self.progress_frame.pack(fill=tk.X)
+
+        self.progress_var = tk.DoubleVar()
+        self.progress_bar = ttk.Progressbar(self.progress_frame, variable=self.progress_var,
+                                             maximum=100, mode='determinate')
+        self.progress_bar.pack(fill=tk.X)
+
+        self.progress_label = ttk.Label(self.progress_frame, text="", style='Status.TLabel')
+        self.progress_label.pack(anchor=tk.W, pady=(5, 0))
+
+        # Generated Maps List
+        maps_frame = ttk.LabelFrame(parent, text="Generated Maps", padding="10")
+        maps_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+
+        # Listbox with scrollbar
+        list_frame = ttk.Frame(maps_frame)
+        list_frame.pack(fill=tk.BOTH, expand=True)
+
+        scrollbar = ttk.Scrollbar(list_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.maps_listbox = tk.Listbox(list_frame, height=6,
+                                        yscrollcommand=scrollbar.set,
+                                        font=('Helvetica', 9))
+        self.maps_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.config(command=self.maps_listbox.yview)
+
+        self.maps_listbox.bind('<<ListboxSelect>>', self._on_map_select)
+
+        # Open folder button
+        open_folder_btn = ttk.Button(maps_frame, text="Open Output Folder",
+                                      command=self._open_output_folder)
+        open_folder_btn.pack(fill=tk.X, pady=(10, 0))
+
+    def _build_preview_panel(self, parent):
+        """Build the map preview panel."""
+        # Preview header
+        preview_header = ttk.Frame(parent)
+        preview_header.pack(fill=tk.X, pady=(0, 5))
+
+        ttk.Label(preview_header, text="Map Preview", style='Header.TLabel').pack(side=tk.LEFT)
+
+        self.preview_label = ttk.Label(preview_header, text="", foreground='gray')
+        self.preview_label.pack(side=tk.RIGHT)
+
+        # Preview canvas frame with border
+        self.preview_frame = ttk.Frame(parent, relief='sunken', borderwidth=2)
+        self.preview_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Placeholder
+        self.placeholder_label = ttk.Label(
+            self.preview_frame,
+            text="Select options and click 'Generate Maps'\nto create weather risk maps.\n\n"
+                 "Generated maps will appear here.",
+            font=('Helvetica', 12),
+            foreground='gray',
+            justify=tk.CENTER
+        )
+        self.placeholder_label.pack(expand=True)
+
+        # Canvas for map display (hidden initially)
+        self.canvas = None
+        self.current_figure = None
+
+    def _build_status_bar(self):
+        """Build the status bar at the bottom."""
+        status_frame = ttk.Frame(self.root)
+        status_frame.pack(side=tk.BOTTOM, fill=tk.X)
+
+        ttk.Separator(status_frame, orient='horizontal').pack(fill=tk.X)
+
+        status_inner = ttk.Frame(status_frame, padding="5")
+        status_inner.pack(fill=tk.X)
+
+        self.status_label = ttk.Label(status_inner, text="Ready", style='Status.TLabel')
+        self.status_label.pack(side=tk.LEFT)
+
+        # Data source indicator
+        self.data_source_label = ttk.Label(status_inner, text="Data: Open-Meteo API",
+                                            style='Status.TLabel', foreground='gray')
+        self.data_source_label.pack(side=tk.RIGHT)
+
+    def _browse_output(self):
+        """Open directory browser for output folder."""
+        directory = filedialog.askdirectory(
+            initialdir=self.output_dir.get(),
+            title="Select Output Directory"
+        )
+        if directory:
+            self.output_dir.set(directory)
+
+    def _open_output_folder(self):
+        """Open the output folder in file explorer."""
+        output_path = self.output_dir.get()
+        if os.path.exists(output_path):
+            if sys.platform == 'win32':
+                os.startfile(output_path)
+            elif sys.platform == 'darwin':
+                os.system(f'open "{output_path}"')
+            else:
+                os.system(f'xdg-open "{output_path}"')
+        else:
+            messagebox.showwarning("Folder Not Found",
+                                   f"Output folder does not exist:\n{output_path}")
+
+    def _update_status(self, message: str):
+        """Update status bar message."""
+        self.status_label.config(text=message)
+        self.root.update_idletasks()
+
+    def _update_progress(self, value: float, message: str = ""):
+        """Update progress bar and label."""
+        self.progress_var.set(value)
+        if message:
+            self.progress_label.config(text=message)
+        self.root.update_idletasks()
+
+    def _generate_maps(self):
+        """Start map generation in a separate thread."""
+        if self.is_generating:
+            return
+
+        self.is_generating = True
+        self.generate_btn.config(state='disabled')
+        self.maps_listbox.delete(0, tk.END)
+        self.current_maps = {}
+
+        # Clear preview
+        self._clear_preview()
+        self.placeholder_label.config(text="Generating maps...")
+
+        # Start generation thread
+        thread = threading.Thread(target=self._generate_maps_thread, daemon=True)
+        thread.start()
+
+    def _generate_maps_thread(self):
+        """Generate maps in background thread."""
+        try:
+            region = self.selected_region.get()
+            risk_type = self.selected_risk.get()
+            use_demo = self.use_demo_data.get()
+            output_dir = self.output_dir.get()
+
+            self.root.after(0, lambda: self._update_status(f"Initializing generator..."))
+            self.root.after(0, lambda: self._update_progress(5, "Initializing..."))
+
+            # Create generator
+            self.generator = WeatherMapGenerator(output_dir=output_dir)
+
+            # Get region config
+            region_config = REGIONS[region]
+
+            self.root.after(0, lambda: self._update_progress(10, "Fetching weather data..."))
+            self.root.after(0, lambda: self._update_status(
+                f"{'Generating sample' if use_demo else 'Fetching'} data for {region_config['name']}..."))
+
+            # Fetch/generate data
+            if use_demo:
+                grid_data = self.generator._generate_sample_data(
+                    region_config['bounds'],
+                    region_config['grid_resolution']
+                )
+            else:
+                grid_data = self.generator.client.fetch_grid_data(
+                    region_config['bounds'],
+                    region_config['grid_resolution']
+                )
+
+            self.root.after(0, lambda: self._update_progress(40, "Calculating risk levels..."))
+            self.root.after(0, lambda: self._update_status("Calculating risk levels..."))
+
+            # Calculate risks
+            severe_risks = {}
+            flood_risks = {}
+            fire_risks = {}
+
+            for (lat, lon), weather_data in grid_data['data'].items():
+                severe_risks[(lat, lon)] = self.generator.calculator.calculate_severe_weather_risk(weather_data)
+                flood_risks[(lat, lon)] = self.generator.calculator.calculate_flood_risk(weather_data)
+                fire_risks[(lat, lon)] = self.generator.calculator.calculate_fire_risk(weather_data)
+
+            # Generate requested maps
+            output_files = {}
+            progress_base = 50
+            maps_to_generate = []
+
+            if risk_type in ['all', 'severe']:
+                maps_to_generate.append(('severe', 'severe_weather', severe_risks,
+                                         SEVERE_WEATHER_CATEGORIES, 'Severe Weather Risk Outlook'))
+            if risk_type in ['all', 'flood']:
+                maps_to_generate.append(('flood', 'flood_risk', flood_risks,
+                                         FLOOD_RISK_CATEGORIES, 'Flooding Risk Outlook'))
+            if risk_type in ['all', 'fire']:
+                maps_to_generate.append(('fire', 'fire_risk', fire_risks,
+                                         FIRE_RISK_CATEGORIES, 'Fire Weather Risk Outlook'))
+
+            progress_per_map = 45 / len(maps_to_generate)
+
+            for i, (key, risk_name, risks, categories, title) in enumerate(maps_to_generate):
+                progress = progress_base + (i * progress_per_map)
+                self.root.after(0, lambda p=progress, t=title: (
+                    self._update_progress(p, f"Generating {t}..."),
+                    self._update_status(f"Generating {t}...")
+                ))
+
+                filepath = self.generator.generate_map(
+                    region, risk_name, risks, categories, title,
+                    grid_data['lons'], grid_data['lats']
+                )
+                output_files[key] = filepath
+
+            # Update UI with results
+            self.root.after(0, lambda: self._on_generation_complete(output_files))
+
+        except Exception as e:
+            self.root.after(0, lambda: self._on_generation_error(str(e)))
+
+    def _on_generation_complete(self, output_files: Dict[str, str]):
+        """Handle successful generation completion."""
+        self.is_generating = False
+        self.generate_btn.config(state='normal')
+        self._update_progress(100, "Complete!")
+        self._update_status(f"Generated {len(output_files)} map(s) successfully")
+
+        # Store and display results
+        self.current_maps = output_files
+
+        for risk_type, filepath in output_files.items():
+            filename = os.path.basename(filepath)
+            self.maps_listbox.insert(tk.END, filename)
+
+        # Show first map
+        if output_files:
+            self.maps_listbox.selection_set(0)
+            self._on_map_select(None)
+
+        self.placeholder_label.pack_forget()
+
+    def _on_generation_error(self, error_msg: str):
+        """Handle generation error."""
+        self.is_generating = False
+        self.generate_btn.config(state='normal')
+        self._update_progress(0, "")
+        self._update_status("Error occurred")
+        self.placeholder_label.config(text=f"Error: {error_msg}\n\nPlease try again.")
+        messagebox.showerror("Generation Error", f"An error occurred:\n{error_msg}")
+
+    def _on_map_select(self, event):
+        """Handle map selection from listbox."""
+        selection = self.maps_listbox.curselection()
+        if not selection:
+            return
+
+        index = selection[0]
+        filename = self.maps_listbox.get(index)
+
+        # Find corresponding filepath
+        for risk_type, filepath in self.current_maps.items():
+            if os.path.basename(filepath) == filename:
+                self._show_map_preview(filepath)
+                break
+
+    def _clear_preview(self):
+        """Clear the map preview."""
+        if self.canvas:
+            self.canvas.get_tk_widget().destroy()
+            self.canvas = None
+        if self.current_figure:
+            plt.close(self.current_figure)
+            self.current_figure = None
+
+    def _show_map_preview(self, filepath: str):
+        """Display a map in the preview panel."""
+        self._clear_preview()
+
+        try:
+            # Load and display image using matplotlib
+            from PIL import Image
+
+            img = Image.open(filepath)
+
+            # Create figure for display
+            self.current_figure = plt.figure(figsize=(10, 7), dpi=100)
+            ax = self.current_figure.add_subplot(111)
+            ax.imshow(img)
+            ax.axis('off')
+            self.current_figure.tight_layout(pad=0)
+
+            # Embed in tkinter
+            self.canvas = FigureCanvasTkAgg(self.current_figure, master=self.preview_frame)
+            self.canvas.draw()
+            self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+            # Update preview label
+            self.preview_label.config(text=os.path.basename(filepath))
+
+        except Exception as e:
+            self.placeholder_label.config(text=f"Error loading preview:\n{e}")
+            self.placeholder_label.pack(expand=True)
+
+    def run(self):
+        """Start the GUI main loop."""
+        self.root.mainloop()
+
+
+# =============================================================================
 # COMMAND-LINE INTERFACE
 # =============================================================================
 
@@ -749,23 +1210,37 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  %(prog)s --region us                    Generate all US maps with live data
-  %(prog)s --region europe --demo         Generate Europe maps with sample data
-  %(prog)s --all --demo                   Generate all maps with sample data
-  %(prog)s --all --output ./maps          Generate all maps, save to ./maps/
+  %(prog)s                                Launch GUI (default)
+  %(prog)s --gui                          Launch GUI explicitly
+  %(prog)s --cli --region us              Generate US maps via CLI
+  %(prog)s --cli --region europe --demo   Generate Europe maps with sample data
+  %(prog)s --cli --all --demo             Generate all maps with sample data
+  %(prog)s --cli --all --output ./maps    Generate all maps, save to ./maps/
         """
+    )
+
+    parser.add_argument(
+        '--gui', '-g',
+        action='store_true',
+        help='Launch graphical user interface (default if no arguments)'
+    )
+
+    parser.add_argument(
+        '--cli', '-c',
+        action='store_true',
+        help='Run in command-line mode'
     )
 
     parser.add_argument(
         '--region', '-r',
         choices=['us', 'australia', 'europe'],
-        help='Region to generate maps for'
+        help='Region to generate maps for (CLI mode)'
     )
 
     parser.add_argument(
         '--all', '-a',
         action='store_true',
-        help='Generate maps for all regions'
+        help='Generate maps for all regions (CLI mode)'
     )
 
     parser.add_argument(
@@ -789,33 +1264,55 @@ Examples:
 
     args = parser.parse_args()
 
-    if not args.region and not args.all:
-        parser.error("Please specify --region or --all")
+    # Determine mode: GUI by default, CLI if --cli or other CLI args specified
+    use_cli = args.cli or args.region or args.all
 
-    print("="*60)
-    print("Weather Risk Maps Generator")
-    print("="*60)
-    print(f"Output directory: {args.output}")
-    print(f"Data source: {'Sample data' if args.demo else 'Open-Meteo API'}")
-    print()
+    if not use_cli:
+        # Launch GUI
+        if not HAS_TK:
+            print("Error: tkinter is not available. Please install it or use --cli mode.")
+            print("On Ubuntu/Debian: sudo apt-get install python3-tk")
+            print("On Fedora: sudo dnf install python3-tkinter")
+            print("On macOS: tkinter is usually included with Python")
+            sys.exit(1)
 
-    generator = WeatherMapGenerator(output_dir=args.output)
-
-    if args.all:
-        outputs = generator.generate_all_maps(use_sample_data=args.demo)
+        try:
+            print("Launching Weather Risk Maps GUI...")
+            gui = WeatherMapGUI()
+            gui.run()
+        except Exception as e:
+            print(f"Error launching GUI: {e}")
+            print("Try running with --cli mode instead.")
+            sys.exit(1)
     else:
-        outputs = {args.region: generator.generate_region_maps(args.region, use_sample_data=args.demo)}
+        # CLI mode
+        if not args.region and not args.all:
+            parser.error("In CLI mode, please specify --region or --all")
 
-    print("\n" + "="*60)
-    print("Generation Complete!")
-    print("="*60)
-    print("\nGenerated files:")
-    for region, files in outputs.items():
-        print(f"\n{REGIONS[region]['name']}:")
-        for risk_type, filepath in files.items():
-            print(f"  - {risk_type}: {filepath}")
+        print("="*60)
+        print("Weather Risk Maps Generator (CLI Mode)")
+        print("="*60)
+        print(f"Output directory: {args.output}")
+        print(f"Data source: {'Sample data' if args.demo else 'Open-Meteo API'}")
+        print()
 
-    return outputs
+        generator = WeatherMapGenerator(output_dir=args.output)
+
+        if args.all:
+            outputs = generator.generate_all_maps(use_sample_data=args.demo)
+        else:
+            outputs = {args.region: generator.generate_region_maps(args.region, use_sample_data=args.demo)}
+
+        print("\n" + "="*60)
+        print("Generation Complete!")
+        print("="*60)
+        print("\nGenerated files:")
+        for region, files in outputs.items():
+            print(f"\n{REGIONS[region]['name']}:")
+            for risk_type, filepath in files.items():
+                print(f"  - {risk_type}: {filepath}")
+
+        return outputs
 
 
 if __name__ == '__main__':
