@@ -754,35 +754,82 @@ class WeatherMapGenerator:
 class WeatherMapGUI:
     """Graphical User Interface for Weather Risk Maps Generator."""
 
+    # Predefined regions with display info
+    REGION_INFO = {
+        'us': {'name': 'United States', 'flag': 'US', 'desc': 'Continental US with state boundaries'},
+        'australia': {'name': 'Australia', 'flag': 'AU', 'desc': 'Full continental coverage'},
+        'europe': {'name': 'Europe', 'flag': 'EU', 'desc': 'Western to Eastern Europe'},
+        'custom': {'name': 'Custom Area', 'flag': 'CUSTOM', 'desc': 'Define your own region'}
+    }
+
+    # Event type info with colors
+    EVENT_TYPES = {
+        'severe': {
+            'name': 'Severe Weather',
+            'desc': 'Thunderstorms, tornadoes, hail, damaging winds',
+            'color': '#FF6B6B',
+            'categories': 5
+        },
+        'flood': {
+            'name': 'Flooding Risk',
+            'desc': 'Flash floods, river flooding, urban flooding',
+            'color': '#4ECDC4',
+            'categories': 4
+        },
+        'fire': {
+            'name': 'Fire Weather',
+            'desc': 'Wildfire conditions, red flag warnings',
+            'color': '#FF8C42',
+            'categories': 4
+        }
+    }
+
     def __init__(self):
         if not HAS_TK:
             raise ImportError("tkinter is required for GUI mode")
 
         self.root = tk.Tk()
         self.root.title("Weather Risk Maps Generator")
-        self.root.geometry("1200x800")
-        self.root.minsize(900, 600)
+        self.root.geometry("1300x850")
+        self.root.minsize(1000, 700)
 
         # Set icon and styling
         self.style = ttk.Style()
         self.style.theme_use('clam')
 
         # Configure custom styles
-        self.style.configure('Title.TLabel', font=('Helvetica', 16, 'bold'))
-        self.style.configure('Header.TLabel', font=('Helvetica', 11, 'bold'))
+        self.style.configure('Title.TLabel', font=('Helvetica', 18, 'bold'))
+        self.style.configure('Header.TLabel', font=('Helvetica', 12, 'bold'))
+        self.style.configure('SubHeader.TLabel', font=('Helvetica', 10, 'bold'))
         self.style.configure('Status.TLabel', font=('Helvetica', 9))
-        self.style.configure('Generate.TButton', font=('Helvetica', 11, 'bold'), padding=10)
+        self.style.configure('Generate.TButton', font=('Helvetica', 12, 'bold'), padding=12)
+        self.style.configure('Region.TRadiobutton', font=('Helvetica', 11))
+        self.style.configure('Event.TCheckbutton', font=('Helvetica', 10))
 
         # Variables
         self.selected_region = tk.StringVar(value='us')
-        self.selected_risk = tk.StringVar(value='all')
         self.use_demo_data = tk.BooleanVar(value=True)
         self.output_dir = tk.StringVar(value=os.path.join(os.getcwd(), 'output'))
         self.is_generating = False
         self.current_maps = {}
 
+        # Event type checkboxes
+        self.event_severe = tk.BooleanVar(value=True)
+        self.event_flood = tk.BooleanVar(value=True)
+        self.event_fire = tk.BooleanVar(value=True)
+
+        # Custom region coordinates
+        self.custom_lat_min = tk.StringVar(value='25.0')
+        self.custom_lat_max = tk.StringVar(value='50.0')
+        self.custom_lon_min = tk.StringVar(value='-125.0')
+        self.custom_lon_max = tk.StringVar(value='-65.0')
+
         # Generator
         self.generator = None
+
+        # Map click state
+        self.map_click_start = None
+        self.selection_rect = None
 
         # Build UI
         self._build_ui()
@@ -805,8 +852,8 @@ class WeatherMapGUI:
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)
 
-        # Left panel - Controls
-        left_panel = ttk.Frame(main_frame, width=300)
+        # Left panel - Controls (wider now)
+        left_panel = ttk.Frame(main_frame, width=380)
         left_panel.pack(side=tk.LEFT, fill=tk.Y, padx=(0, 10))
         left_panel.pack_propagate(False)
 
@@ -820,78 +867,190 @@ class WeatherMapGUI:
 
     def _build_control_panel(self, parent):
         """Build the control panel with options."""
-        # Title
-        title_label = ttk.Label(parent, text="Weather Risk Maps", style='Title.TLabel')
-        title_label.pack(pady=(0, 20))
+        # Scrollable frame for controls
+        canvas = tk.Canvas(parent, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=canvas.yview)
+        scrollable_frame = ttk.Frame(canvas)
 
-        # Region Selection
-        region_frame = ttk.LabelFrame(parent, text="Region", padding="10")
-        region_frame.pack(fill=tk.X, pady=(0, 10))
+        scrollable_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
 
-        regions = [
-            ('us', 'United States', 'Continental US with state boundaries'),
-            ('australia', 'Australia', 'Full continental coverage'),
-            ('europe', 'Europe', 'Western to Eastern Europe')
+        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
+
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Enable mousewheel scrolling
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        # Title with icon
+        title_frame = ttk.Frame(scrollable_frame)
+        title_frame.pack(fill=tk.X, pady=(0, 15))
+
+        title_label = ttk.Label(title_frame, text="Weather Risk Maps",
+                                 style='Title.TLabel')
+        title_label.pack()
+
+        subtitle = ttk.Label(title_frame, text="Generate NWS-style risk outlook maps",
+                              font=('Helvetica', 9), foreground='gray')
+        subtitle.pack()
+
+        # ============ STEP 1: SELECT REGION ============
+        step1_frame = ttk.LabelFrame(scrollable_frame, text="Step 1: Select Region", padding="10")
+        step1_frame.pack(fill=tk.X, pady=(0, 10))
+
+        # Region radio buttons with better layout
+        regions_data = [
+            ('us', 'United States', 'Continental US'),
+            ('australia', 'Australia', 'Full continent'),
+            ('europe', 'Europe', 'West to East'),
+            ('custom', 'Custom Region', 'Define coordinates')
         ]
 
-        for value, name, desc in regions:
-            rb = ttk.Radiobutton(region_frame, text=name, value=value,
-                                  variable=self.selected_region)
-            rb.pack(anchor=tk.W)
-            desc_label = ttk.Label(region_frame, text=f"  {desc}",
+        for value, name, desc in regions_data:
+            region_row = ttk.Frame(step1_frame)
+            region_row.pack(fill=tk.X, pady=2)
+
+            rb = ttk.Radiobutton(region_row, text=name, value=value,
+                                  variable=self.selected_region,
+                                  command=self._on_region_change,
+                                  style='Region.TRadiobutton')
+            rb.pack(side=tk.LEFT)
+
+            desc_label = ttk.Label(region_row, text=f"({desc})",
                                     font=('Helvetica', 8), foreground='gray')
-            desc_label.pack(anchor=tk.W)
+            desc_label.pack(side=tk.LEFT, padx=(5, 0))
 
-        # Risk Type Selection
-        risk_frame = ttk.LabelFrame(parent, text="Risk Type", padding="10")
-        risk_frame.pack(fill=tk.X, pady=(0, 10))
+        # Custom coordinates frame (hidden by default)
+        self.custom_coords_frame = ttk.Frame(step1_frame)
 
-        risks = [
-            ('all', 'All Risk Types'),
-            ('severe', 'Severe Weather (5 categories)'),
-            ('flood', 'Flooding Risk (4 categories)'),
-            ('fire', 'Fire Weather (4 categories)')
+        ttk.Separator(self.custom_coords_frame, orient='horizontal').pack(fill=tk.X, pady=10)
+
+        coord_label = ttk.Label(self.custom_coords_frame, text="Enter coordinates or click map to select:",
+                                 font=('Helvetica', 9, 'italic'))
+        coord_label.pack(anchor=tk.W)
+
+        # Latitude row
+        lat_frame = ttk.Frame(self.custom_coords_frame)
+        lat_frame.pack(fill=tk.X, pady=5)
+
+        ttk.Label(lat_frame, text="Latitude:", width=10).pack(side=tk.LEFT)
+        ttk.Label(lat_frame, text="Min:").pack(side=tk.LEFT)
+        ttk.Entry(lat_frame, textvariable=self.custom_lat_min, width=8).pack(side=tk.LEFT, padx=2)
+        ttk.Label(lat_frame, text="Max:").pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Entry(lat_frame, textvariable=self.custom_lat_max, width=8).pack(side=tk.LEFT, padx=2)
+
+        # Longitude row
+        lon_frame = ttk.Frame(self.custom_coords_frame)
+        lon_frame.pack(fill=tk.X, pady=5)
+
+        ttk.Label(lon_frame, text="Longitude:", width=10).pack(side=tk.LEFT)
+        ttk.Label(lon_frame, text="Min:").pack(side=tk.LEFT)
+        ttk.Entry(lon_frame, textvariable=self.custom_lon_min, width=8).pack(side=tk.LEFT, padx=2)
+        ttk.Label(lon_frame, text="Max:").pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Entry(lon_frame, textvariable=self.custom_lon_max, width=8).pack(side=tk.LEFT, padx=2)
+
+        # Quick presets for custom
+        presets_frame = ttk.Frame(self.custom_coords_frame)
+        presets_frame.pack(fill=tk.X, pady=5)
+
+        ttk.Label(presets_frame, text="Quick presets:", font=('Helvetica', 8)).pack(side=tk.LEFT)
+
+        presets = [
+            ('Texas', -107, -93, 25, 37),
+            ('California', -125, -114, 32, 42),
+            ('UK', -8, 2, 50, 59),
+            ('Japan', 129, 146, 31, 46),
         ]
 
-        for value, name in risks:
-            rb = ttk.Radiobutton(risk_frame, text=name, value=value,
-                                  variable=self.selected_risk)
-            rb.pack(anchor=tk.W, pady=2)
+        for name, lon_min, lon_max, lat_min, lat_max in presets:
+            btn = ttk.Button(presets_frame, text=name, width=8,
+                             command=lambda a=lon_min, b=lon_max, c=lat_min, d=lat_max:
+                                 self._set_custom_coords(a, b, c, d))
+            btn.pack(side=tk.LEFT, padx=2)
 
-        # Data Source
-        data_frame = ttk.LabelFrame(parent, text="Data Source", padding="10")
-        data_frame.pack(fill=tk.X, pady=(0, 10))
+        # ============ STEP 2: SELECT EVENT TYPES ============
+        step2_frame = ttk.LabelFrame(scrollable_frame, text="Step 2: Select Event Types", padding="10")
+        step2_frame.pack(fill=tk.X, pady=(0, 10))
 
-        demo_cb = ttk.Checkbutton(data_frame, text="Use Demo Data (faster)",
+        instruction = ttk.Label(step2_frame, text="Select which risk maps to generate:",
+                                 font=('Helvetica', 9))
+        instruction.pack(anchor=tk.W, pady=(0, 5))
+
+        # Event checkboxes with color indicators
+        events = [
+            (self.event_severe, 'severe', 'Severe Weather', '#FF6B6B', '5 categories: Marginal to High'),
+            (self.event_flood, 'flood', 'Flooding Risk', '#4ECDC4', '4 categories: Marginal to Extreme'),
+            (self.event_fire, 'fire', 'Fire Weather', '#FF8C42', '4 categories: Elevated to Exceptional'),
+        ]
+
+        for var, key, name, color, desc in events:
+            event_row = ttk.Frame(step2_frame)
+            event_row.pack(fill=tk.X, pady=3)
+
+            # Color indicator
+            color_canvas = tk.Canvas(event_row, width=16, height=16, highlightthickness=1,
+                                      highlightbackground='gray')
+            color_canvas.pack(side=tk.LEFT, padx=(0, 5))
+            color_canvas.create_rectangle(2, 2, 14, 14, fill=color, outline='')
+
+            cb = ttk.Checkbutton(event_row, text=name, variable=var,
+                                  style='Event.TCheckbutton')
+            cb.pack(side=tk.LEFT)
+
+            desc_label = ttk.Label(event_row, text=f"- {desc}",
+                                    font=('Helvetica', 8), foreground='gray')
+            desc_label.pack(side=tk.LEFT, padx=(5, 0))
+
+        # Select all/none buttons
+        select_btns = ttk.Frame(step2_frame)
+        select_btns.pack(fill=tk.X, pady=(5, 0))
+
+        ttk.Button(select_btns, text="Select All", width=10,
+                   command=self._select_all_events).pack(side=tk.LEFT, padx=2)
+        ttk.Button(select_btns, text="Select None", width=10,
+                   command=self._select_no_events).pack(side=tk.LEFT, padx=2)
+
+        # ============ STEP 3: DATA SOURCE ============
+        step3_frame = ttk.LabelFrame(scrollable_frame, text="Step 3: Data Source", padding="10")
+        step3_frame.pack(fill=tk.X, pady=(0, 10))
+
+        demo_cb = ttk.Checkbutton(step3_frame, text="Use Demo Data (faster, for testing)",
                                    variable=self.use_demo_data)
         demo_cb.pack(anchor=tk.W)
 
-        demo_desc = ttk.Label(data_frame,
-                               text="Uncheck to fetch live data from Open-Meteo API\n(requires internet, may take several minutes)",
+        demo_desc = ttk.Label(step3_frame,
+                               text="Uncheck to fetch live weather data from Open-Meteo API.\n"
+                                    "Live data requires internet and takes longer to process.",
                                font=('Helvetica', 8), foreground='gray')
         demo_desc.pack(anchor=tk.W, pady=(5, 0))
 
-        # Output Directory
-        output_frame = ttk.LabelFrame(parent, text="Output Directory", padding="10")
-        output_frame.pack(fill=tk.X, pady=(0, 10))
+        # ============ STEP 4: OUTPUT LOCATION ============
+        step4_frame = ttk.LabelFrame(scrollable_frame, text="Step 4: Save Location", padding="10")
+        step4_frame.pack(fill=tk.X, pady=(0, 10))
 
-        dir_frame = ttk.Frame(output_frame)
+        dir_frame = ttk.Frame(step4_frame)
         dir_frame.pack(fill=tk.X)
 
-        dir_entry = ttk.Entry(dir_frame, textvariable=self.output_dir, width=25)
+        dir_entry = ttk.Entry(dir_frame, textvariable=self.output_dir)
         dir_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        browse_btn = ttk.Button(dir_frame, text="Browse", command=self._browse_output)
+        browse_btn = ttk.Button(dir_frame, text="Browse...", command=self._browse_output)
         browse_btn.pack(side=tk.LEFT, padx=(5, 0))
 
-        # Generate Button
-        self.generate_btn = ttk.Button(parent, text="Generate Maps",
+        # ============ GENERATE BUTTON ============
+        self.generate_btn = ttk.Button(scrollable_frame, text="Generate Maps",
                                         style='Generate.TButton',
                                         command=self._generate_maps)
-        self.generate_btn.pack(fill=tk.X, pady=(20, 10))
+        self.generate_btn.pack(fill=tk.X, pady=(15, 10))
 
-        # Progress
-        self.progress_frame = ttk.Frame(parent)
+        # Progress section
+        self.progress_frame = ttk.Frame(scrollable_frame)
         self.progress_frame.pack(fill=tk.X)
 
         self.progress_var = tk.DoubleVar()
@@ -899,32 +1058,64 @@ class WeatherMapGUI:
                                              maximum=100, mode='determinate')
         self.progress_bar.pack(fill=tk.X)
 
-        self.progress_label = ttk.Label(self.progress_frame, text="", style='Status.TLabel')
+        self.progress_label = ttk.Label(self.progress_frame, text="Ready to generate",
+                                         style='Status.TLabel')
         self.progress_label.pack(anchor=tk.W, pady=(5, 0))
 
-        # Generated Maps List
-        maps_frame = ttk.LabelFrame(parent, text="Generated Maps", padding="10")
+        # ============ GENERATED MAPS LIST ============
+        maps_frame = ttk.LabelFrame(scrollable_frame, text="Generated Maps", padding="10")
         maps_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
 
         # Listbox with scrollbar
         list_frame = ttk.Frame(maps_frame)
         list_frame.pack(fill=tk.BOTH, expand=True)
 
-        scrollbar = ttk.Scrollbar(list_frame)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        list_scrollbar = ttk.Scrollbar(list_frame)
+        list_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
 
-        self.maps_listbox = tk.Listbox(list_frame, height=6,
-                                        yscrollcommand=scrollbar.set,
-                                        font=('Helvetica', 9))
+        self.maps_listbox = tk.Listbox(list_frame, height=5,
+                                        yscrollcommand=list_scrollbar.set,
+                                        font=('Helvetica', 9),
+                                        selectbackground='#4ECDC4')
         self.maps_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.config(command=self.maps_listbox.yview)
+        list_scrollbar.config(command=self.maps_listbox.yview)
 
         self.maps_listbox.bind('<<ListboxSelect>>', self._on_map_select)
 
-        # Open folder button
-        open_folder_btn = ttk.Button(maps_frame, text="Open Output Folder",
-                                      command=self._open_output_folder)
-        open_folder_btn.pack(fill=tk.X, pady=(10, 0))
+        # Button row
+        btn_row = ttk.Frame(maps_frame)
+        btn_row.pack(fill=tk.X, pady=(10, 0))
+
+        ttk.Button(btn_row, text="Open Folder",
+                   command=self._open_output_folder).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btn_row, text="View Selected",
+                   command=lambda: self._on_map_select(None)).pack(side=tk.LEFT, padx=2)
+
+    def _on_region_change(self):
+        """Handle region selection change."""
+        if self.selected_region.get() == 'custom':
+            self.custom_coords_frame.pack(fill=tk.X, pady=(5, 0))
+        else:
+            self.custom_coords_frame.pack_forget()
+
+    def _set_custom_coords(self, lon_min, lon_max, lat_min, lat_max):
+        """Set custom coordinates from preset."""
+        self.custom_lon_min.set(str(lon_min))
+        self.custom_lon_max.set(str(lon_max))
+        self.custom_lat_min.set(str(lat_min))
+        self.custom_lat_max.set(str(lat_max))
+
+    def _select_all_events(self):
+        """Select all event types."""
+        self.event_severe.set(True)
+        self.event_flood.set(True)
+        self.event_fire.set(True)
+
+    def _select_no_events(self):
+        """Deselect all event types."""
+        self.event_severe.set(False)
+        self.event_flood.set(False)
+        self.event_fire.set(False)
 
     def _build_preview_panel(self, parent):
         """Build the map preview panel."""
@@ -1031,22 +1222,56 @@ class WeatherMapGUI:
         """Generate maps in background thread."""
         try:
             region = self.selected_region.get()
-            risk_type = self.selected_risk.get()
             use_demo = self.use_demo_data.get()
             output_dir = self.output_dir.get()
 
-            self.root.after(0, lambda: self._update_status(f"Initializing generator..."))
+            # Get selected event types
+            selected_events = []
+            if self.event_severe.get():
+                selected_events.append('severe')
+            if self.event_flood.get():
+                selected_events.append('flood')
+            if self.event_fire.get():
+                selected_events.append('fire')
+
+            if not selected_events:
+                raise ValueError("Please select at least one event type")
+
+            self.root.after(0, lambda: self._update_status("Initializing generator..."))
             self.root.after(0, lambda: self._update_progress(5, "Initializing..."))
 
             # Create generator
             self.generator = WeatherMapGenerator(output_dir=output_dir)
 
-            # Get region config
-            region_config = REGIONS[region]
+            # Get region config - handle custom region
+            if region == 'custom':
+                try:
+                    lon_min = float(self.custom_lon_min.get())
+                    lon_max = float(self.custom_lon_max.get())
+                    lat_min = float(self.custom_lat_min.get())
+                    lat_max = float(self.custom_lat_max.get())
+
+                    if lon_min >= lon_max or lat_min >= lat_max:
+                        raise ValueError("Invalid coordinates: min must be less than max")
+
+                    region_config = {
+                        'name': 'Custom Region',
+                        'bounds': [lon_min, lon_max, lat_min, lat_max],
+                        'grid_resolution': 1.0,
+                        'projection': ccrs.PlateCarree()
+                    }
+                    # Add custom region to REGIONS temporarily
+                    REGIONS['custom'] = region_config
+                except ValueError as e:
+                    raise ValueError(f"Invalid coordinates: {e}")
+            else:
+                region_config = REGIONS[region]
+
+            region_name = region_config['name']
 
             self.root.after(0, lambda: self._update_progress(10, "Fetching weather data..."))
             self.root.after(0, lambda: self._update_status(
-                f"{'Generating sample' if use_demo else 'Fetching'} data for {region_config['name']}..."))
+                f"{'Generating sample' if use_demo else 'Fetching'} data for {region_name}..."))
 
             # Fetch/generate data
             if use_demo:
@@ -1063,28 +1288,31 @@ class WeatherMapGUI:
             self.root.after(0, lambda: self._update_progress(40, "Calculating risk levels..."))
             self.root.after(0, lambda: self._update_status("Calculating risk levels..."))
 
-            # Calculate risks
+            # Calculate risks only for selected event types
             severe_risks = {}
             flood_risks = {}
             fire_risks = {}
 
             for (lat, lon), weather_data in grid_data['data'].items():
-                severe_risks[(lat, lon)] = self.generator.calculator.calculate_severe_weather_risk(weather_data)
-                flood_risks[(lat, lon)] = self.generator.calculator.calculate_flood_risk(weather_data)
-                fire_risks[(lat, lon)] = self.generator.calculator.calculate_fire_risk(weather_data)
+                if 'severe' in selected_events:
+                    severe_risks[(lat, lon)] = self.generator.calculator.calculate_severe_weather_risk(weather_data)
+                if 'flood' in selected_events:
+                    flood_risks[(lat, lon)] = self.generator.calculator.calculate_flood_risk(weather_data)
+                if 'fire' in selected_events:
+                    fire_risks[(lat, lon)] = self.generator.calculator.calculate_fire_risk(weather_data)
 
             # Generate requested maps
             output_files = {}
             progress_base = 50
             maps_to_generate = []
 
-            if risk_type in ['all', 'severe']:
+            if 'severe' in selected_events:
                 maps_to_generate.append(('severe', 'severe_weather', severe_risks,
                                          SEVERE_WEATHER_CATEGORIES, 'Severe Weather Risk Outlook'))
-            if risk_type in ['all', 'flood']:
+            if 'flood' in selected_events:
                 maps_to_generate.append(('flood', 'flood_risk', flood_risks,
                                          FLOOD_RISK_CATEGORIES, 'Flooding Risk Outlook'))
-            if risk_type in ['all', 'fire']:
+            if 'fire' in selected_events:
                 maps_to_generate.append(('fire', 'fire_risk', fire_risks,
                                          FIRE_RISK_CATEGORIES, 'Fire Weather Risk Outlook'))
 
