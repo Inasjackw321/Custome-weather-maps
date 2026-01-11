@@ -10,11 +10,13 @@ Generates maps for:
 """
 
 import numpy as np
+import matplotlib
+# Use Agg backend for thread-safe rendering (no GUI)
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import matplotlib.patches as mpatches
 from matplotlib.colors import LinearSegmentedColormap, BoundaryNorm
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 from cartopy.mpl.gridliner import LONGITUDE_FORMATTER, LATITUDE_FORMATTER
@@ -1939,11 +1941,19 @@ class WeatherMapGUI:
         self.event_fire.set(False)
 
     def _open_map_picker(self):
-        """Open a map picker dialog for selecting a custom region."""
+        """Open a map picker dialog for selecting a custom region using tkinter Canvas."""
+        import tempfile
+
+        try:
+            from PIL import Image, ImageTk
+        except ImportError:
+            messagebox.showerror("Error", "PIL/Pillow is required for the map picker.\nInstall with: pip install Pillow")
+            return
+
         # Create popup window
         picker_window = tk.Toplevel(self.root)
         picker_window.title("Select Region on Map")
-        picker_window.geometry("900x650")
+        picker_window.geometry("900x700")
         picker_window.transient(self.root)
 
         # Instructions
@@ -1954,45 +1964,80 @@ class WeatherMapGUI:
                   text="Click and drag to select a region. Release to confirm selection.",
                   font=('Helvetica', 10)).pack(side=tk.LEFT)
 
-        # Create matplotlib figure with world map
-        map_frame = ttk.Frame(picker_window)
-        map_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-
-        fig = plt.figure(figsize=(12, 8))
+        # Generate world map image using matplotlib (Agg backend)
+        fig = plt.figure(figsize=(12, 7))
         ax = fig.add_subplot(111, projection=ccrs.PlateCarree())
-
-        # Set up the map
         ax.set_global()
         ax.add_feature(cfeature.LAND, facecolor='#E8E8E8', edgecolor='none')
         ax.add_feature(cfeature.OCEAN, facecolor='#CCE5FF')
         ax.add_feature(cfeature.COASTLINE, edgecolor='#666666', linewidth=0.5)
         ax.add_feature(cfeature.BORDERS, edgecolor='#999999', linewidth=0.3)
         ax.add_feature(cfeature.LAKES, facecolor='#CCE5FF', edgecolor='#6699CC', linewidth=0.3)
-
-        # Add gridlines
         gl = ax.gridlines(draw_labels=True, linewidth=0.5, color='gray', alpha=0.5)
         gl.top_labels = False
         gl.right_labels = False
-
         ax.set_title("Click and drag to select your region", fontsize=12, fontweight='bold')
 
-        # Embed in tkinter
-        canvas = FigureCanvasTkAgg(fig, master=map_frame)
-        canvas.draw()
-        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        # Save to temp file
+        temp_file = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
+        temp_path = temp_file.name
+        temp_file.close()
 
-        # Selection state - using a class to avoid closure issues
+        fig.savefig(temp_path, dpi=100, bbox_inches='tight', facecolor='white')
+        plt.close(fig)
+
+        # Load image with PIL
+        pil_image = Image.open(temp_path)
+        img_width, img_height = pil_image.size
+
+        # Create canvas frame
+        map_frame = ttk.Frame(picker_window)
+        map_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        # Create tkinter canvas
+        canvas = tk.Canvas(map_frame, width=img_width, height=img_height, bg='white')
+        canvas.pack(fill=tk.BOTH, expand=True)
+
+        # Keep reference to prevent garbage collection
+        picker_window.tk_image = ImageTk.PhotoImage(pil_image)
+        canvas.create_image(0, 0, anchor=tk.NW, image=picker_window.tk_image, tags="map")
+
+        # Map coordinate conversion (approximate for PlateCarree projection)
+        # The image spans -180 to 180 longitude and -90 to 90 latitude
+        # But with margins from matplotlib, we need to account for that
+        # Approximate margins: left ~10%, right ~5%, top ~8%, bottom ~12%
+        left_margin = int(img_width * 0.10)
+        right_margin = int(img_width * 0.05)
+        top_margin = int(img_height * 0.08)
+        bottom_margin = int(img_height * 0.12)
+
+        map_width = img_width - left_margin - right_margin
+        map_height = img_height - top_margin - bottom_margin
+
+        def pixel_to_coords(px, py):
+            """Convert pixel coordinates to lat/lon."""
+            # Normalize to 0-1 range within the map area
+            norm_x = (px - left_margin) / map_width
+            norm_y = (py - top_margin) / map_height
+
+            # Convert to lat/lon
+            lon = -180 + norm_x * 360
+            lat = 90 - norm_y * 180  # Y is inverted
+
+            return lon, lat
+
+        # Selection state
         class SelectionState:
             def __init__(self):
-                self.start_x = None
-                self.start_y = None
-                self.rect_patch = None
+                self.start_px = None
+                self.start_py = None
+                self.rect_id = None
                 self.final_coords = None
                 self.is_dragging = False
 
         state = SelectionState()
 
-        # Status label (define early so it can be used in handlers)
+        # Status label
         bottom_frame = ttk.Frame(picker_window, padding="10")
         bottom_frame.pack(fill=tk.X)
 
@@ -2002,63 +2047,48 @@ class WeatherMapGUI:
 
         def on_press(event):
             """Handle mouse press."""
-            if event.inaxes != ax or event.xdata is None or event.ydata is None:
-                return
-            state.start_x = event.xdata
-            state.start_y = event.ydata
+            state.start_px = event.x
+            state.start_py = event.y
             state.is_dragging = True
 
-            # Remove previous rectangle if any
-            if state.rect_patch is not None:
-                try:
-                    state.rect_patch.remove()
-                except:
-                    pass
-                state.rect_patch = None
-            canvas.draw_idle()
+            # Remove previous rectangle
+            if state.rect_id is not None:
+                canvas.delete(state.rect_id)
+                state.rect_id = None
 
         def on_motion(event):
             """Handle mouse motion while dragging."""
-            if not state.is_dragging or state.start_x is None:
+            if not state.is_dragging or state.start_px is None:
                 return
-            if event.inaxes != ax or event.xdata is None or event.ydata is None:
-                return
-
-            x0, y0 = state.start_x, state.start_y
-            x1, y1 = event.xdata, event.ydata
 
             # Remove previous rectangle
-            if state.rect_patch is not None:
-                try:
-                    state.rect_patch.remove()
-                except:
-                    pass
-
-            # Calculate rectangle parameters
-            rect_x = min(x0, x1)
-            rect_y = min(y0, y1)
-            rect_width = abs(x1 - x0)
-            rect_height = abs(y1 - y0)
+            if state.rect_id is not None:
+                canvas.delete(state.rect_id)
 
             # Draw new rectangle
-            state.rect_patch = mpatches.Rectangle(
-                (rect_x, rect_y), rect_width, rect_height,
-                linewidth=2, edgecolor='red',
-                facecolor='red', alpha=0.3,
-                transform=ccrs.PlateCarree()
+            state.rect_id = canvas.create_rectangle(
+                state.start_px, state.start_py, event.x, event.y,
+                outline='red', width=2, fill='red', stipple='gray50'
             )
-            ax.add_patch(state.rect_patch)
 
-            # Store coordinates
-            state.final_coords = (min(x0, x1), max(x0, x1), min(y0, y1), max(y0, y1))
+            # Calculate coordinates
+            lon1, lat1 = pixel_to_coords(state.start_px, state.start_py)
+            lon2, lat2 = pixel_to_coords(event.x, event.y)
 
-            # Update status
-            lon_min, lon_max, lat_min, lat_max = state.final_coords
+            lon_min, lon_max = min(lon1, lon2), max(lon1, lon2)
+            lat_min, lat_max = min(lat1, lat2), max(lat1, lat2)
+
+            # Clamp to valid ranges
+            lon_min = max(-180, min(180, lon_min))
+            lon_max = max(-180, min(180, lon_max))
+            lat_min = max(-90, min(90, lat_min))
+            lat_max = max(-90, min(90, lat_max))
+
+            state.final_coords = (lon_min, lon_max, lat_min, lat_max)
+
             status_label.config(
                 text=f"Selection: Lon [{lon_min:.1f} to {lon_max:.1f}], Lat [{lat_min:.1f} to {lat_max:.1f}]"
             )
-
-            canvas.draw_idle()
 
         def on_release(event):
             """Handle mouse release."""
@@ -2089,24 +2119,24 @@ class WeatherMapGUI:
                     text=f"Selected: Lon [{lon_min:.1f} to {lon_max:.1f}], Lat [{lat_min:.1f} to {lat_max:.1f}] - Click Apply"
                 )
 
-        # Connect events
-        canvas.mpl_connect('button_press_event', on_press)
-        canvas.mpl_connect('motion_notify_event', on_motion)
-        canvas.mpl_connect('button_release_event', on_release)
+        # Bind mouse events
+        canvas.bind('<Button-1>', on_press)
+        canvas.bind('<B1-Motion>', on_motion)
+        canvas.bind('<ButtonRelease-1>', on_release)
 
         def apply_and_close():
             """Apply selection and close window."""
+            # Clean up temp file
             try:
-                plt.close(fig)
+                os.unlink(temp_path)
             except:
                 pass
             picker_window.destroy()
 
         def cancel():
             """Cancel and close window."""
-            # Reset coordinates if cancelled
             try:
-                plt.close(fig)
+                os.unlink(temp_path)
             except:
                 pass
             picker_window.destroy()
@@ -2117,7 +2147,7 @@ class WeatherMapGUI:
         # Handle window close
         def on_closing():
             try:
-                plt.close(fig)
+                os.unlink(temp_path)
             except:
                 pass
             picker_window.destroy()
