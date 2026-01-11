@@ -1354,7 +1354,8 @@ class WeatherMapGenerator:
         }
 
         # Generate synthetic weather data with realistic patterns
-        np.random.seed(42)  # For reproducibility
+        # Use time-based seed for variety, but keep some spatial coherence
+        np.random.seed(int(abs(lon_min * 100 + lat_min * 10)) % 10000)
 
         for lat in lats:
             for lon in lons:
@@ -1365,32 +1366,41 @@ class WeatherMapGenerator:
                 # Add some spatial correlation and randomness
                 noise = np.random.random()
                 noise2 = np.random.random()
-                pattern = np.sin(lat_factor * np.pi) * np.cos(lon_factor * np.pi * 2)
-                storm_pattern = np.sin((lat_factor + lon_factor) * np.pi * 1.5) * noise
+
+                # Create multiple storm cells across the region
+                pattern = np.sin(lat_factor * np.pi * 2) * np.cos(lon_factor * np.pi * 3)
+                storm_pattern = max(0, np.sin((lat_factor * 2 + lon_factor) * np.pi * 2) + 0.3 * noise)
+
+                # Create distinct "hot spots" for severe weather
+                center_dist = np.sqrt((lat_factor - 0.5)**2 + (lon_factor - 0.5)**2)
+                storm_cell1 = max(0, 1 - 3 * np.sqrt((lat_factor - 0.3)**2 + (lon_factor - 0.4)**2))
+                storm_cell2 = max(0, 1 - 3 * np.sqrt((lat_factor - 0.7)**2 + (lon_factor - 0.6)**2))
+                storm_cell3 = max(0, 1 - 4 * np.sqrt((lat_factor - 0.5)**2 + (lon_factor - 0.8)**2))
+                combined_storms = max(storm_cell1, storm_cell2, storm_cell3) * (0.7 + 0.3 * noise)
 
                 # Temperature based on latitude (warmer in south for northern hemisphere)
-                base_temp = 15 + 25 * (1 - lat_factor) + 5 * noise
-                dewpoint = base_temp - 5 - 15 * noise2
+                base_temp = 20 + 20 * (1 - lat_factor) + 8 * noise
+                dewpoint = base_temp - 3 - 10 * noise2
 
-                # Humidity inversely related to temperature
-                base_rh = max(10, 80 - 50 * lat_factor - 20 * noise)
+                # Humidity higher in storm areas
+                base_rh = max(20, 60 + 35 * combined_storms - 20 * noise)
 
-                # Wind patterns
-                wind_10m = 8 + 25 * noise * abs(pattern)
+                # Wind patterns - stronger in storm areas
+                wind_10m = 10 + 40 * combined_storms * noise + 15 * abs(pattern)
                 wind_80m = wind_10m * (1.3 + 0.4 * noise2)
-                wind_gust = wind_10m * (1.5 + 0.5 * noise)
+                wind_gust = wind_10m * (1.6 + 0.6 * combined_storms)
 
-                # Precipitation pattern
-                precip = max(0, 8 * (noise + pattern * 0.3))
-                precip_prob = min(100, max(0, 30 + 60 * storm_pattern))
+                # Precipitation pattern - much higher in storm zones
+                precip = max(0, 5 + 25 * combined_storms + 10 * storm_pattern * noise)
+                precip_prob = min(100, max(0, 20 + 80 * combined_storms))
 
-                # Soil moisture (drier in warm areas)
-                soil_base = 0.35 - 0.2 * lat_factor + 0.1 * noise
+                # Soil moisture (higher where precipitation occurs)
+                soil_base = 0.25 + 0.25 * combined_storms + 0.1 * noise
 
-                # CAPE and instability
-                cape = max(0, 500 + 3000 * storm_pattern * noise)
-                lifted_index = 2 - 8 * storm_pattern * noise
-                cin = -50 - 100 * noise2
+                # CAPE and instability - much higher in storm zones
+                cape = max(0, 200 + 4000 * combined_storms * (0.5 + 0.5 * noise))
+                lifted_index = 4 - 12 * combined_storms * (0.5 + 0.5 * noise)
+                cin = -30 - 80 * noise2
 
                 grid_data['data'][(lat, lon)] = {
                     'hourly': {
@@ -1440,16 +1450,16 @@ class WeatherMapGenerator:
                         'snow_depth': [0] * 24,
                     },
                     'daily': {
-                        'weather_code': [95 if storm_pattern > 0.5 else int(3 * noise)] * 3,
+                        'weather_code': [95 if combined_storms > 0.4 else (80 if precip > 10 else int(3 * noise))] * 3,
                         'temperature_2m_max': [base_temp + 8] * 3,
                         'temperature_2m_min': [base_temp - 5] * 3,
                         'apparent_temperature_max': [base_temp + 10] * 3,
                         'apparent_temperature_min': [base_temp - 7] * 3,
-                        'precipitation_sum': [max(0, precip * 12 * (0.5 + 0.5 * np.random.random())) for _ in range(3)],
-                        'rain_sum': [max(0, precip * 10 * (0.5 + 0.5 * np.random.random())) for _ in range(3)],
-                        'showers_sum': [max(0, precip * 2 * np.random.random()) for _ in range(3)],
+                        'precipitation_sum': [max(0, precip * 18 * (0.6 + 0.4 * np.random.random())) for _ in range(3)],
+                        'rain_sum': [max(0, precip * 15 * (0.6 + 0.4 * np.random.random())) for _ in range(3)],
+                        'showers_sum': [max(0, precip * 3 * np.random.random()) for _ in range(3)],
                         'snowfall_sum': [0] * 3,
-                        'precipitation_hours': [int(6 + 12 * storm_pattern * noise)] * 3,
+                        'precipitation_hours': [int(4 + 18 * combined_storms)] * 3,
                         'precipitation_probability_max': [precip_prob] * 3,
                         'wind_speed_10m_max': [wind_gust * 0.9] * 3,
                         'wind_gusts_10m_max': [wind_gust * 1.2] * 3,
