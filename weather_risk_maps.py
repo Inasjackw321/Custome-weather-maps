@@ -1204,14 +1204,26 @@ class WeatherMapGenerator:
         ax.add_feature(cfeature.OCEAN, facecolor='#E6F3FF')
         ax.add_feature(cfeature.LAKES, facecolor='#E6F3FF', edgecolor='#6699CC', linewidth=0.5)
         ax.add_feature(cfeature.RIVERS, edgecolor='#6699CC', linewidth=0.3)
-        ax.add_feature(cfeature.BORDERS, edgecolor='#666666', linewidth=0.5)
-        ax.add_feature(cfeature.COASTLINE, edgecolor='#333333', linewidth=0.8)
 
-        # Add states/provinces for US
-        if region_key == 'us':
-            ax.add_feature(cfeature.STATES, edgecolor='#888888', linewidth=0.3)
+        # Add country borders (thicker, more visible)
+        ax.add_feature(cfeature.BORDERS, edgecolor='#444444', linewidth=1.0)
+        ax.add_feature(cfeature.COASTLINE, edgecolor='#222222', linewidth=1.0)
 
-        # Create colormap
+        # Add states/provinces for all regions (administrative boundaries)
+        try:
+            states_provinces = cfeature.NaturalEarthFeature(
+                category='cultural',
+                name='admin_1_states_provinces_lines',
+                scale='50m',
+                facecolor='none'
+            )
+            ax.add_feature(states_provinces, edgecolor='#888888', linewidth=0.4)
+        except Exception:
+            # Fallback to US states if global admin boundaries fail
+            if region_key == 'us':
+                ax.add_feature(cfeature.STATES, edgecolor='#888888', linewidth=0.3)
+
+        # Create colormap (skip level 0 which is "None")
         cmap, norm = self._create_colormap(categories)
 
         # Interpolate and plot risk data
@@ -1220,14 +1232,18 @@ class WeatherMapGenerator:
                 grid_lons, grid_lats, risk_data, resolution=0.25
             )
 
-            # Plot filled contours
-            mesh = ax.pcolormesh(
-                lon_grid, lat_grid, risk_grid,
-                cmap=cmap, norm=norm,
-                transform=ccrs.PlateCarree(),
-                alpha=0.7,
-                shading='auto'
-            )
+            # Mask level 0 (no risk) so map features show through
+            risk_grid_masked = np.ma.masked_where(risk_grid < 0.5, risk_grid)
+
+            # Plot filled contours only where there's actual risk
+            if np.any(~risk_grid_masked.mask):
+                mesh = ax.pcolormesh(
+                    lon_grid, lat_grid, risk_grid_masked,
+                    cmap=cmap, norm=norm,
+                    transform=ccrs.PlateCarree(),
+                    alpha=0.7,
+                    shading='auto'
+                )
 
         # Add gridlines
         gl = ax.gridlines(draw_labels=True, linewidth=0.5, color='gray', alpha=0.5)
@@ -2323,7 +2339,7 @@ class WeatherMapGUI:
                     'name': self.selected_country,
                     'bounds': bounds,
                     'grid_resolution': grid_res,
-                    'projection': ccrs.LambertConformal(central_longitude=center_lon, central_latitude=center_lat)
+                    'projection': ccrs.PlateCarree()  # Use PlateCarree for reliability
                 }
                 # Add country region to REGIONS temporarily
                 REGIONS['country'] = region_config
