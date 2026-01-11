@@ -120,57 +120,60 @@ class OpenMeteoClient:
         Returns:
             Dictionary with weather data or None if request fails
         """
+        # Use parameters that are actually available in Open-Meteo API
+        # Note: Some advanced parameters require specific models
+        hourly_params = [
+            'temperature_2m',
+            'relative_humidity_2m',
+            'dew_point_2m',  # Fixed: was dewpoint_2m
+            'apparent_temperature',
+            'precipitation_probability',
+            'precipitation',
+            'rain',
+            'showers',
+            'snowfall',
+            'snow_depth',
+            'weather_code',
+            'pressure_msl',
+            'surface_pressure',
+            'cloud_cover',
+            'visibility',
+            'et0_fao_evapotranspiration',  # Fixed: hourly version
+            'wind_speed_10m',
+            'wind_speed_80m',
+            'wind_direction_10m',
+            'wind_gusts_10m',
+            'cape',
+            'soil_temperature_0cm',
+            'soil_moisture_0_1cm',   # Fixed: was soil_moisture_0_to_1cm
+            'soil_moisture_1_3cm',   # Fixed: was soil_moisture_1_to_3cm
+            'soil_moisture_3_9cm',   # Fixed: was soil_moisture_3_to_9cm
+            'soil_moisture_9_27cm',  # Fixed: was soil_moisture_9_to_27cm
+        ]
+
+        daily_params = [
+            'weather_code',
+            'temperature_2m_max',
+            'temperature_2m_min',
+            'apparent_temperature_max',
+            'apparent_temperature_min',
+            'precipitation_sum',
+            'rain_sum',
+            'showers_sum',
+            'snowfall_sum',
+            'precipitation_hours',
+            'precipitation_probability_max',
+            'wind_speed_10m_max',
+            'wind_gusts_10m_max',
+            'wind_direction_10m_dominant',
+            'et0_fao_evapotranspiration'
+        ]
+
         params = {
             'latitude': lat,
             'longitude': lon,
-            'hourly': ','.join([
-                'temperature_2m',
-                'relative_humidity_2m',
-                'dewpoint_2m',
-                'apparent_temperature',
-                'precipitation_probability',
-                'precipitation',
-                'rain',
-                'showers',
-                'snowfall',
-                'snow_depth',
-                'weather_code',
-                'pressure_msl',
-                'surface_pressure',
-                'cloud_cover',
-                'visibility',
-                'evapotranspiration',
-                'wind_speed_10m',
-                'wind_speed_80m',
-                'wind_direction_10m',
-                'wind_gusts_10m',
-                'cape',
-                'lifted_index',
-                'convective_inhibition',
-                'freezing_level_height',
-                'soil_temperature_0cm',
-                'soil_moisture_0_to_1cm',
-                'soil_moisture_1_to_3cm',
-                'soil_moisture_3_to_9cm',
-                'soil_moisture_9_to_27cm'
-            ]),
-            'daily': ','.join([
-                'weather_code',
-                'temperature_2m_max',
-                'temperature_2m_min',
-                'apparent_temperature_max',
-                'apparent_temperature_min',
-                'precipitation_sum',
-                'rain_sum',
-                'showers_sum',
-                'snowfall_sum',
-                'precipitation_hours',
-                'precipitation_probability_max',
-                'wind_speed_10m_max',
-                'wind_gusts_10m_max',
-                'wind_direction_10m_dominant',
-                'et0_fao_evapotranspiration'
-            ]),
+            'hourly': ','.join(hourly_params),
+            'daily': ','.join(daily_params),
             'timezone': 'UTC',
             'forecast_days': 3
         }
@@ -178,7 +181,42 @@ class OpenMeteoClient:
         try:
             response = self.session.get(self.BASE_URL, params=params, timeout=30)
             response.raise_for_status()
-            return response.json()
+            data = response.json()
+
+            # Normalize the data keys for compatibility with risk calculators
+            if 'hourly' in data:
+                hourly = data['hourly']
+                # Map API names to our expected names
+                if 'dew_point_2m' in hourly:
+                    hourly['dewpoint_2m'] = hourly['dew_point_2m']
+                if 'soil_moisture_0_1cm' in hourly:
+                    hourly['soil_moisture_0_to_1cm'] = hourly['soil_moisture_0_1cm']
+                if 'soil_moisture_1_3cm' in hourly:
+                    hourly['soil_moisture_1_to_3cm'] = hourly['soil_moisture_1_3cm']
+                if 'soil_moisture_3_9cm' in hourly:
+                    hourly['soil_moisture_3_to_9cm'] = hourly['soil_moisture_3_9cm']
+                if 'soil_moisture_9_27cm' in hourly:
+                    hourly['soil_moisture_9_to_27cm'] = hourly['soil_moisture_9_27cm']
+                if 'et0_fao_evapotranspiration' in hourly:
+                    hourly['evapotranspiration'] = hourly['et0_fao_evapotranspiration']
+
+                # Add synthetic lifted_index and CIN based on CAPE
+                # (These aren't in free API, so we estimate from CAPE)
+                if 'cape' in hourly:
+                    cape_values = hourly['cape']
+                    # Estimate lifted index from CAPE (higher CAPE = more negative LI)
+                    hourly['lifted_index'] = [
+                        max(-10, 2 - (c / 500)) if c is not None else 2
+                        for c in cape_values
+                    ]
+                    # Estimate CIN (assuming moderate cap)
+                    hourly['convective_inhibition'] = [-50] * len(cape_values)
+                else:
+                    hourly['cape'] = [0] * 24
+                    hourly['lifted_index'] = [2] * 24
+                    hourly['convective_inhibition'] = [0] * 24
+
+            return data
         except requests.RequestException as e:
             print(f"Error fetching data for ({lat}, {lon}): {e}")
             return None
@@ -885,10 +923,13 @@ class WeatherMapGenerator:
                     transform=fig.transFigure,
                     zorder=1)
 
-        # Add Kaldock branding in corner
+        # Add Kaldock branding with GitHub URL in corner
         plt.figtext(0.01, 0.01, 'Created by Kaldock',
                     ha='left', fontsize=9, fontweight='bold',
                     color='#333333', alpha=0.8)
+        plt.figtext(0.01, 0.035, 'https://github.com/Inasjackw321/Custome-weather-maps',
+                    ha='left', fontsize=7,
+                    color='#555555', alpha=0.7)
 
         # Save figure
         filename = f"{region_key}_{risk_type}_{datetime.utcnow().strftime('%Y%m%d_%H%M')}.png"
@@ -1328,6 +1369,19 @@ class WeatherMapGUI:
                                  self._set_custom_coords(a, b, c, d))
             btn.pack(side=tk.LEFT, padx=2)
 
+        # Map picker button
+        map_picker_frame = ttk.Frame(self.custom_coords_frame)
+        map_picker_frame.pack(fill=tk.X, pady=(10, 0))
+
+        map_picker_btn = ttk.Button(map_picker_frame, text="Pick Region on Map",
+                                     command=self._open_map_picker)
+        map_picker_btn.pack(fill=tk.X)
+
+        map_picker_hint = ttk.Label(map_picker_frame,
+                                     text="Click and drag on a world map to select your region",
+                                     font=('Helvetica', 8), foreground='gray')
+        map_picker_hint.pack(anchor=tk.W, pady=(2, 0))
+
         # ============ STEP 2: SELECT EVENT TYPES ============
         step2_frame = ttk.LabelFrame(scrollable_frame, text="Step 2: Select Event Types", padding="10")
         step2_frame.pack(fill=tk.X, pady=(0, 10))
@@ -1470,6 +1524,150 @@ class WeatherMapGUI:
         self.event_severe.set(False)
         self.event_flood.set(False)
         self.event_fire.set(False)
+
+    def _open_map_picker(self):
+        """Open a map picker dialog for selecting a custom region."""
+        # Create popup window
+        picker_window = tk.Toplevel(self.root)
+        picker_window.title("Select Region on Map")
+        picker_window.geometry("900x650")
+        picker_window.transient(self.root)
+        picker_window.grab_set()
+
+        # Instructions
+        instruction_frame = ttk.Frame(picker_window, padding="10")
+        instruction_frame.pack(fill=tk.X)
+
+        ttk.Label(instruction_frame,
+                  text="Click and drag to select a region. The selected area will be highlighted.",
+                  font=('Helvetica', 10)).pack(side=tk.LEFT)
+
+        # Create matplotlib figure with world map
+        map_frame = ttk.Frame(picker_window)
+        map_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        fig = plt.figure(figsize=(12, 8))
+        ax = fig.add_subplot(111, projection=ccrs.PlateCarree())
+
+        # Set up the map
+        ax.set_global()
+        ax.add_feature(cfeature.LAND, facecolor='#E8E8E8', edgecolor='none')
+        ax.add_feature(cfeature.OCEAN, facecolor='#CCE5FF')
+        ax.add_feature(cfeature.COASTLINE, edgecolor='#666666', linewidth=0.5)
+        ax.add_feature(cfeature.BORDERS, edgecolor='#999999', linewidth=0.3)
+        ax.add_feature(cfeature.LAKES, facecolor='#CCE5FF', edgecolor='#6699CC', linewidth=0.3)
+
+        # Add gridlines
+        gl = ax.gridlines(draw_labels=True, linewidth=0.5, color='gray', alpha=0.5)
+        gl.top_labels = False
+        gl.right_labels = False
+
+        ax.set_title("Click and drag to select your region", fontsize=12, fontweight='bold')
+
+        # Embed in tkinter
+        canvas = FigureCanvasTkAgg(fig, master=map_frame)
+        canvas.draw()
+        canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+
+        # Selection state
+        selection_state = {
+            'start': None,
+            'rect': None,
+            'rect_patch': None
+        }
+
+        def on_press(event):
+            """Handle mouse press."""
+            if event.inaxes != ax:
+                return
+            selection_state['start'] = (event.xdata, event.ydata)
+            # Remove previous rectangle if any
+            if selection_state['rect_patch']:
+                selection_state['rect_patch'].remove()
+                selection_state['rect_patch'] = None
+            canvas.draw()
+
+        def on_motion(event):
+            """Handle mouse motion while dragging."""
+            if selection_state['start'] is None or event.inaxes != ax:
+                return
+
+            x0, y0 = selection_state['start']
+            x1, y1 = event.xdata, event.ydata
+
+            # Remove previous rectangle
+            if selection_state['rect_patch']:
+                selection_state['rect_patch'].remove()
+
+            # Draw new rectangle
+            width = x1 - x0
+            height = y1 - y0
+            rect = mpatches.Rectangle((x0, y0), width, height,
+                                        linewidth=2, edgecolor='red',
+                                        facecolor='red', alpha=0.3,
+                                        transform=ccrs.PlateCarree())
+            selection_state['rect_patch'] = ax.add_patch(rect)
+            selection_state['rect'] = (x0, y0, x1, y1)
+            canvas.draw()
+
+        def on_release(event):
+            """Handle mouse release."""
+            if selection_state['start'] is None:
+                return
+
+            if event.inaxes == ax and selection_state['rect']:
+                x0, y0, x1, y1 = selection_state['rect']
+                # Normalize coordinates (ensure min < max)
+                lon_min = min(x0, x1)
+                lon_max = max(x0, x1)
+                lat_min = min(y0, y1)
+                lat_max = max(y0, y1)
+
+                # Update the coordinate entry fields
+                self.custom_lon_min.set(f"{lon_min:.1f}")
+                self.custom_lon_max.set(f"{lon_max:.1f}")
+                self.custom_lat_min.set(f"{lat_min:.1f}")
+                self.custom_lat_max.set(f"{lat_max:.1f}")
+
+                # Update status label
+                status_label.config(
+                    text=f"Selected: Lon [{lon_min:.1f} to {lon_max:.1f}], Lat [{lat_min:.1f} to {lat_max:.1f}]"
+                )
+
+            selection_state['start'] = None
+
+        # Connect events
+        canvas.mpl_connect('button_press_event', on_press)
+        canvas.mpl_connect('motion_notify_event', on_motion)
+        canvas.mpl_connect('button_release_event', on_release)
+
+        # Status and buttons frame
+        bottom_frame = ttk.Frame(picker_window, padding="10")
+        bottom_frame.pack(fill=tk.X)
+
+        status_label = ttk.Label(bottom_frame, text="Drag on the map to select a region",
+                                  font=('Helvetica', 9), foreground='gray')
+        status_label.pack(side=tk.LEFT)
+
+        def apply_and_close():
+            """Apply selection and close window."""
+            plt.close(fig)
+            picker_window.destroy()
+
+        def cancel():
+            """Cancel and close window."""
+            plt.close(fig)
+            picker_window.destroy()
+
+        ttk.Button(bottom_frame, text="Apply Selection", command=apply_and_close).pack(side=tk.RIGHT, padx=5)
+        ttk.Button(bottom_frame, text="Cancel", command=cancel).pack(side=tk.RIGHT)
+
+        # Handle window close
+        def on_closing():
+            plt.close(fig)
+            picker_window.destroy()
+
+        picker_window.protocol("WM_DELETE_WINDOW", on_closing)
 
     def _build_preview_panel(self, parent):
         """Build the map preview panel."""
