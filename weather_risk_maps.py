@@ -1485,6 +1485,11 @@ class WeatherMapGUI:
         self.is_generating = False
         self.current_maps = {}
 
+        # Preview image references (keep references to avoid garbage collection)
+        self.preview_pil_image = None
+        self.preview_tk_image = None
+        self.preview_image_label = None
+
         # Event type checkboxes
         self.event_severe = tk.BooleanVar(value=True)
         self.event_flood = tk.BooleanVar(value=True)
@@ -2338,33 +2343,59 @@ class WeatherMapGUI:
     def _clear_preview(self):
         """Clear the map preview."""
         if self.canvas:
-            self.canvas.get_tk_widget().destroy()
+            try:
+                self.canvas.get_tk_widget().destroy()
+            except:
+                pass
             self.canvas = None
         if self.current_figure:
-            plt.close(self.current_figure)
+            try:
+                plt.close(self.current_figure)
+            except:
+                pass
             self.current_figure = None
+        # Clear any preview image label
+        if hasattr(self, 'preview_image_label') and self.preview_image_label:
+            self.preview_image_label.destroy()
+            self.preview_image_label = None
+        # Clear PIL image reference
+        if hasattr(self, 'preview_pil_image'):
+            self.preview_pil_image = None
+        if hasattr(self, 'preview_tk_image'):
+            self.preview_tk_image = None
 
     def _show_map_preview(self, filepath: str):
-        """Display a map in the preview panel."""
+        """Display a map in the preview panel using tkinter native widgets."""
         self._clear_preview()
 
         try:
-            # Load and display image using matplotlib
-            from PIL import Image
+            from PIL import Image, ImageTk
 
-            img = Image.open(filepath)
+            # Load image with PIL
+            self.preview_pil_image = Image.open(filepath)
 
-            # Create figure for display
-            self.current_figure = plt.figure(figsize=(10, 7), dpi=100)
-            ax = self.current_figure.add_subplot(111)
-            ax.imshow(img)
-            ax.axis('off')
-            self.current_figure.tight_layout(pad=0)
+            # Get the preview frame size
+            self.preview_frame.update_idletasks()
+            frame_width = self.preview_frame.winfo_width() - 20
+            frame_height = self.preview_frame.winfo_height() - 20
 
-            # Embed in tkinter
-            self.canvas = FigureCanvasTkAgg(self.current_figure, master=self.preview_frame)
-            self.canvas.draw()
-            self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+            # Resize image to fit frame while maintaining aspect ratio
+            img_width, img_height = self.preview_pil_image.size
+            ratio = min(frame_width / img_width, frame_height / img_height)
+            new_width = int(img_width * ratio)
+            new_height = int(img_height * ratio)
+
+            if new_width > 0 and new_height > 0:
+                resized = self.preview_pil_image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+            else:
+                resized = self.preview_pil_image
+
+            # Convert to PhotoImage for tkinter
+            self.preview_tk_image = ImageTk.PhotoImage(resized)
+
+            # Create label to display image
+            self.preview_image_label = ttk.Label(self.preview_frame, image=self.preview_tk_image)
+            self.preview_image_label.pack(expand=True)
 
             # Update preview label
             self.preview_label.config(text=os.path.basename(filepath))
