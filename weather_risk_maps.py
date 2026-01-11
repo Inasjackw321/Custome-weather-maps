@@ -1550,7 +1550,9 @@ class WeatherMapGUI:
         # Variables
         self.selected_region = tk.StringVar(value='us')
         self.use_demo_data = tk.BooleanVar(value=True)
-        self.output_dir = tk.StringVar(value=os.path.join(os.getcwd(), 'output'))
+        # Use script directory for output, not cwd (avoids system32 on Windows)
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        self.output_dir = tk.StringVar(value=os.path.join(script_dir, 'output'))
         self.is_generating = False
         self.current_maps = {}
 
