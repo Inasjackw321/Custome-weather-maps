@@ -2432,7 +2432,8 @@ class WeatherMapGUI:
             self.root.after(0, lambda: self._on_generation_complete(output_files))
 
         except Exception as e:
-            self.root.after(0, lambda: self._on_generation_error(str(e)))
+            error_msg = str(e)
+            self.root.after(0, lambda msg=error_msg: self._on_generation_error(msg))
 
     def _on_generation_complete(self, output_files: Dict[str, str]):
         """Handle successful generation completion."""
