@@ -546,21 +546,77 @@ class RiskCalculator:
 
     @staticmethod
     def _safe_max(values, default=0):
-        """Safely get max from list, handling None values."""
-        filtered = [v for v in values if v is not None]
+        """Safely get max from list, handling None values and invalid types."""
+        if not values:
+            return default
+        filtered = []
+        for v in values:
+            if v is not None:
+                try:
+                    filtered.append(float(v))
+                except (ValueError, TypeError):
+                    pass
         return max(filtered) if filtered else default
 
     @staticmethod
     def _safe_min(values, default=0):
-        """Safely get min from list, handling None values."""
-        filtered = [v for v in values if v is not None]
+        """Safely get min from list, handling None values and invalid types."""
+        if not values:
+            return default
+        filtered = []
+        for v in values:
+            if v is not None:
+                try:
+                    filtered.append(float(v))
+                except (ValueError, TypeError):
+                    pass
         return min(filtered) if filtered else default
 
     @staticmethod
     def _safe_mean(values, default=0):
-        """Safely get mean from list, handling None values."""
-        filtered = [v for v in values if v is not None]
+        """Safely get mean from list, handling None values and invalid types."""
+        if not values:
+            return default
+        filtered = []
+        for v in values:
+            if v is not None:
+                try:
+                    filtered.append(float(v))
+                except (ValueError, TypeError):
+                    pass
         return sum(filtered) / len(filtered) if filtered else default
+
+    @staticmethod
+    def _safe_sum(values, default=0):
+        """Safely get sum from list, handling None values and invalid types."""
+        if not values:
+            return default
+        total = 0
+        for v in values:
+            if v is not None:
+                try:
+                    total += float(v)
+                except (ValueError, TypeError):
+                    pass
+        return total
+
+    @staticmethod
+    def _get_values(data_dict, key, length=24, default_value=0):
+        """Safely extract values from a dictionary with proper defaults."""
+        values = data_dict.get(key, [])
+        if not values:
+            return [default_value] * length
+        # Ensure we have enough values
+        result = []
+        for i in range(length):
+            if i < len(values) and values[i] is not None:
+                try:
+                    result.append(float(values[i]))
+                except (ValueError, TypeError):
+                    result.append(default_value)
+            else:
+                result.append(default_value)
+        return result
 
     @staticmethod
     def calculate_severe_weather_risk(data: Dict) -> int:
@@ -584,21 +640,23 @@ class RiskCalculator:
         4 - Moderate: Widespread severe storms expected
         5 - High: Major severe weather outbreak expected
         """
-        if not data or 'hourly' not in data:
+        if not data:
             return 0
 
-        hourly = data['hourly']
+        hourly = data.get('hourly', {})
+        if not hourly:
+            return 0
 
-        # Get values for next 24 hours
-        cape_values = hourly.get('cape', [0])[:24]
-        li_values = hourly.get('lifted_index', [0])[:24]
-        cin_values = hourly.get('convective_inhibition', [0])[:24]
-        wind_10m = hourly.get('wind_speed_10m', [0])[:24]
-        wind_80m = hourly.get('wind_speed_80m', [0])[:24]
-        wind_gust_values = hourly.get('wind_gusts_10m', [0])[:24]
-        precip_values = hourly.get('precipitation', [0])[:24]
-        weather_codes = hourly.get('weather_code', [0])[:24]
-        precip_prob = hourly.get('precipitation_probability', [0])[:24]
+        # Get values for next 24 hours using safe extraction
+        cape_values = RiskCalculator._get_values(hourly, 'cape', 24, 0)
+        li_values = RiskCalculator._get_values(hourly, 'lifted_index', 24, 2)
+        cin_values = RiskCalculator._get_values(hourly, 'convective_inhibition', 24, 0)
+        wind_10m = RiskCalculator._get_values(hourly, 'wind_speed_10m', 24, 10)
+        wind_80m = RiskCalculator._get_values(hourly, 'wind_speed_80m', 24, 15)
+        wind_gust_values = RiskCalculator._get_values(hourly, 'wind_gusts_10m', 24, 15)
+        precip_values = RiskCalculator._get_values(hourly, 'precipitation', 24, 0)
+        weather_codes = RiskCalculator._get_values(hourly, 'weather_code', 24, 0)
+        precip_prob = RiskCalculator._get_values(hourly, 'precipitation_probability', 24, 0)
 
         # Calculate key parameters
         cape_max = RiskCalculator._safe_max(cape_values, 0)
@@ -748,34 +806,33 @@ class RiskCalculator:
         3 - High: Significant flooding expected
         4 - Extreme: Major/flash flooding likely
         """
-        if not data or 'daily' not in data:
+        if not data:
             return 0
 
-        daily = data['daily']
+        daily = data.get('daily', {})
         hourly = data.get('hourly', {})
 
-        # Get precipitation data
-        precip_sum = daily.get('precipitation_sum', [0])[:3]
-        precip_hours = daily.get('precipitation_hours', [0])[:3]
-        rain_sum = daily.get('rain_sum', [0])[:3]
-        showers_sum = daily.get('showers_sum', [0])[:3]
-        precip_prob = daily.get('precipitation_probability_max', [0])[:3]
+        if not daily and not hourly:
+            return 0
+
+        # Get precipitation data using safe extraction
+        precip_sum = RiskCalculator._get_values(daily, 'precipitation_sum', 3, 0)
+        precip_hours = RiskCalculator._get_values(daily, 'precipitation_hours', 3, 0)
+        precip_prob = RiskCalculator._get_values(daily, 'precipitation_probability_max', 3, 0)
 
         # Get hourly data
-        hourly_precip = hourly.get('precipitation', [0])[:72]
-        hourly_rain = hourly.get('rain', [0])[:72]
-        hourly_showers = hourly.get('showers', [0])[:72]
+        hourly_precip = RiskCalculator._get_values(hourly, 'precipitation', 72, 0)
 
         # Soil moisture at multiple depths
-        soil_0_1 = hourly.get('soil_moisture_0_to_1cm', [0.3])[:24]
-        soil_1_3 = hourly.get('soil_moisture_1_to_3cm', [0.3])[:24]
-        soil_3_9 = hourly.get('soil_moisture_3_to_9cm', [0.3])[:24]
-        soil_9_27 = hourly.get('soil_moisture_9_to_27cm', [0.3])[:24]
+        soil_0_1 = RiskCalculator._get_values(hourly, 'soil_moisture_0_to_1cm', 24, 0.3)
+        soil_1_3 = RiskCalculator._get_values(hourly, 'soil_moisture_1_to_3cm', 24, 0.3)
+        soil_3_9 = RiskCalculator._get_values(hourly, 'soil_moisture_3_to_9cm', 24, 0.3)
+        soil_9_27 = RiskCalculator._get_values(hourly, 'soil_moisture_9_to_27cm', 24, 0.3)
 
         # Calculate key metrics
-        total_precip = sum([v for v in precip_sum if v is not None] or [0])
+        total_precip = RiskCalculator._safe_sum(precip_sum, 0)
         max_daily_precip = RiskCalculator._safe_max(precip_sum, 0)
-        total_hours = sum([v for v in precip_hours if v is not None] or [0])
+        total_hours = RiskCalculator._safe_sum(precip_hours, 0)
         max_hourly = RiskCalculator._safe_max(hourly_precip, 0)
         precip_prob_max = RiskCalculator._safe_max(precip_prob, 0)
 
@@ -889,30 +946,30 @@ class RiskCalculator:
         3 - Extreme: Extreme fire weather conditions
         4 - Exceptional: Exceptionally dangerous fire weather
         """
-        if not data or 'hourly' not in data:
+        if not data:
             return 0
 
-        hourly = data['hourly']
+        hourly = data.get('hourly', {})
         daily = data.get('daily', {})
 
-        # Get hourly parameters
-        temp_values = hourly.get('temperature_2m', [20])[:24]
-        dewpoint_values = hourly.get('dewpoint_2m', [10])[:24]
-        rh_values = hourly.get('relative_humidity_2m', [50])[:24]
-        wind_10m = hourly.get('wind_speed_10m', [10])[:24]
-        wind_80m = hourly.get('wind_speed_80m', [15])[:24]
-        gust_values = hourly.get('wind_gusts_10m', [15])[:24]
-        evap_values = hourly.get('evapotranspiration', [0])[:24]
-        soil_temp = hourly.get('soil_temperature_0cm', [20])[:24]
+        if not hourly:
+            return 0
+
+        # Get hourly parameters using safe extraction
+        temp_values = RiskCalculator._get_values(hourly, 'temperature_2m', 24, 20)
+        dewpoint_values = RiskCalculator._get_values(hourly, 'dewpoint_2m', 24, 10)
+        rh_values = RiskCalculator._get_values(hourly, 'relative_humidity_2m', 24, 50)
+        wind_10m = RiskCalculator._get_values(hourly, 'wind_speed_10m', 24, 10)
+        wind_80m = RiskCalculator._get_values(hourly, 'wind_speed_80m', 24, 15)
+        gust_values = RiskCalculator._get_values(hourly, 'wind_gusts_10m', 24, 15)
 
         # Soil moisture at multiple depths
-        soil_0_1 = hourly.get('soil_moisture_0_to_1cm', [0.3])[:24]
-        soil_1_3 = hourly.get('soil_moisture_1_to_3cm', [0.3])[:24]
-        soil_3_9 = hourly.get('soil_moisture_3_to_9cm', [0.3])[:24]
+        soil_0_1 = RiskCalculator._get_values(hourly, 'soil_moisture_0_to_1cm', 24, 0.3)
+        soil_1_3 = RiskCalculator._get_values(hourly, 'soil_moisture_1_to_3cm', 24, 0.3)
 
         # Daily parameters
-        precip_sum = daily.get('precipitation_sum', [0])[:3]
-        et0_values = daily.get('et0_fao_evapotranspiration', [0])[:3]
+        precip_sum = RiskCalculator._get_values(daily, 'precipitation_sum', 3, 0)
+        et0_values = RiskCalculator._get_values(daily, 'et0_fao_evapotranspiration', 3, 5)
 
         # Calculate key metrics
         max_temp = RiskCalculator._safe_max(temp_values, 20)
@@ -920,8 +977,8 @@ class RiskCalculator:
         mean_rh = RiskCalculator._safe_mean(rh_values, 50)
         max_wind = RiskCalculator._safe_max(wind_10m, 10)
         max_gust = RiskCalculator._safe_max(gust_values, 15)
-        total_precip = sum([v for v in precip_sum if v is not None] or [0])
-        total_et0 = sum([v for v in et0_values if v is not None] or [0])
+        total_precip = RiskCalculator._safe_sum(precip_sum, 0)
+        total_et0 = RiskCalculator._safe_sum(et0_values, 0)
 
         # Calculate dewpoint depression (indicates how dry air is)
         dewpoint_depressions = []
@@ -1888,14 +1945,13 @@ class WeatherMapGUI:
         picker_window.title("Select Region on Map")
         picker_window.geometry("900x650")
         picker_window.transient(self.root)
-        picker_window.grab_set()
 
         # Instructions
         instruction_frame = ttk.Frame(picker_window, padding="10")
         instruction_frame.pack(fill=tk.X)
 
         ttk.Label(instruction_frame,
-                  text="Click and drag to select a region. The selected area will be highlighted.",
+                  text="Click and drag to select a region. Release to confirm selection.",
                   font=('Helvetica', 10)).pack(side=tk.LEFT)
 
         # Create matplotlib figure with world map
@@ -1925,59 +1981,99 @@ class WeatherMapGUI:
         canvas.draw()
         canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
 
-        # Selection state
-        selection_state = {
-            'start': None,
-            'rect': None,
-            'rect_patch': None
-        }
+        # Selection state - using a class to avoid closure issues
+        class SelectionState:
+            def __init__(self):
+                self.start_x = None
+                self.start_y = None
+                self.rect_patch = None
+                self.final_coords = None
+                self.is_dragging = False
+
+        state = SelectionState()
+
+        # Status label (define early so it can be used in handlers)
+        bottom_frame = ttk.Frame(picker_window, padding="10")
+        bottom_frame.pack(fill=tk.X)
+
+        status_label = ttk.Label(bottom_frame, text="Click and drag on the map to select a region",
+                                  font=('Helvetica', 9), foreground='gray')
+        status_label.pack(side=tk.LEFT)
 
         def on_press(event):
             """Handle mouse press."""
-            if event.inaxes != ax:
+            if event.inaxes != ax or event.xdata is None or event.ydata is None:
                 return
-            selection_state['start'] = (event.xdata, event.ydata)
+            state.start_x = event.xdata
+            state.start_y = event.ydata
+            state.is_dragging = True
+
             # Remove previous rectangle if any
-            if selection_state['rect_patch']:
-                selection_state['rect_patch'].remove()
-                selection_state['rect_patch'] = None
-            canvas.draw()
+            if state.rect_patch is not None:
+                try:
+                    state.rect_patch.remove()
+                except:
+                    pass
+                state.rect_patch = None
+            canvas.draw_idle()
 
         def on_motion(event):
             """Handle mouse motion while dragging."""
-            if selection_state['start'] is None or event.inaxes != ax:
+            if not state.is_dragging or state.start_x is None:
+                return
+            if event.inaxes != ax or event.xdata is None or event.ydata is None:
                 return
 
-            x0, y0 = selection_state['start']
+            x0, y0 = state.start_x, state.start_y
             x1, y1 = event.xdata, event.ydata
 
             # Remove previous rectangle
-            if selection_state['rect_patch']:
-                selection_state['rect_patch'].remove()
+            if state.rect_patch is not None:
+                try:
+                    state.rect_patch.remove()
+                except:
+                    pass
+
+            # Calculate rectangle parameters
+            rect_x = min(x0, x1)
+            rect_y = min(y0, y1)
+            rect_width = abs(x1 - x0)
+            rect_height = abs(y1 - y0)
 
             # Draw new rectangle
-            width = x1 - x0
-            height = y1 - y0
-            rect = mpatches.Rectangle((x0, y0), width, height,
-                                        linewidth=2, edgecolor='red',
-                                        facecolor='red', alpha=0.3,
-                                        transform=ccrs.PlateCarree())
-            selection_state['rect_patch'] = ax.add_patch(rect)
-            selection_state['rect'] = (x0, y0, x1, y1)
-            canvas.draw()
+            state.rect_patch = mpatches.Rectangle(
+                (rect_x, rect_y), rect_width, rect_height,
+                linewidth=2, edgecolor='red',
+                facecolor='red', alpha=0.3,
+                transform=ccrs.PlateCarree()
+            )
+            ax.add_patch(state.rect_patch)
+
+            # Store coordinates
+            state.final_coords = (min(x0, x1), max(x0, x1), min(y0, y1), max(y0, y1))
+
+            # Update status
+            lon_min, lon_max, lat_min, lat_max = state.final_coords
+            status_label.config(
+                text=f"Selection: Lon [{lon_min:.1f} to {lon_max:.1f}], Lat [{lat_min:.1f} to {lat_max:.1f}]"
+            )
+
+            canvas.draw_idle()
 
         def on_release(event):
             """Handle mouse release."""
-            if selection_state['start'] is None:
+            if not state.is_dragging:
                 return
 
-            if event.inaxes == ax and selection_state['rect']:
-                x0, y0, x1, y1 = selection_state['rect']
-                # Normalize coordinates (ensure min < max)
-                lon_min = min(x0, x1)
-                lon_max = max(x0, x1)
-                lat_min = min(y0, y1)
-                lat_max = max(y0, y1)
+            state.is_dragging = False
+
+            if state.final_coords is not None:
+                lon_min, lon_max, lat_min, lat_max = state.final_coords
+
+                # Validate selection size
+                if abs(lon_max - lon_min) < 1 or abs(lat_max - lat_min) < 1:
+                    status_label.config(text="Selection too small. Please select a larger area.")
+                    return
 
                 # Update the coordinate entry fields
                 self.custom_lon_min.set(f"{lon_min:.1f}")
@@ -1985,34 +2081,34 @@ class WeatherMapGUI:
                 self.custom_lat_min.set(f"{lat_min:.1f}")
                 self.custom_lat_max.set(f"{lat_max:.1f}")
 
-                # Update status label
-                status_label.config(
-                    text=f"Selected: Lon [{lon_min:.1f} to {lon_max:.1f}], Lat [{lat_min:.1f} to {lat_max:.1f}]"
-                )
+                # Switch to custom region
+                self.selected_region.set('custom')
+                self._on_region_change()
 
-            selection_state['start'] = None
+                status_label.config(
+                    text=f"Selected: Lon [{lon_min:.1f} to {lon_max:.1f}], Lat [{lat_min:.1f} to {lat_max:.1f}] - Click Apply"
+                )
 
         # Connect events
         canvas.mpl_connect('button_press_event', on_press)
         canvas.mpl_connect('motion_notify_event', on_motion)
         canvas.mpl_connect('button_release_event', on_release)
 
-        # Status and buttons frame
-        bottom_frame = ttk.Frame(picker_window, padding="10")
-        bottom_frame.pack(fill=tk.X)
-
-        status_label = ttk.Label(bottom_frame, text="Drag on the map to select a region",
-                                  font=('Helvetica', 9), foreground='gray')
-        status_label.pack(side=tk.LEFT)
-
         def apply_and_close():
             """Apply selection and close window."""
-            plt.close(fig)
+            try:
+                plt.close(fig)
+            except:
+                pass
             picker_window.destroy()
 
         def cancel():
             """Cancel and close window."""
-            plt.close(fig)
+            # Reset coordinates if cancelled
+            try:
+                plt.close(fig)
+            except:
+                pass
             picker_window.destroy()
 
         ttk.Button(bottom_frame, text="Apply Selection", command=apply_and_close).pack(side=tk.RIGHT, padx=5)
@@ -2020,7 +2116,10 @@ class WeatherMapGUI:
 
         # Handle window close
         def on_closing():
-            plt.close(fig)
+            try:
+                plt.close(fig)
+            except:
+                pass
             picker_window.destroy()
 
         picker_window.protocol("WM_DELETE_WINDOW", on_closing)
