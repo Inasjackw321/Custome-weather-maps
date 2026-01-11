@@ -24,6 +24,7 @@ from datetime import datetime, timedelta
 import os
 import sys
 import threading
+import time
 from typing import Dict, List, Tuple, Optional
 import warnings
 
@@ -61,6 +62,204 @@ REGIONS = {
         'grid_resolution': 1.0,
         'projection': ccrs.LambertConformal(central_longitude=10, central_latitude=50),
     }
+}
+
+# =============================================================================
+# COUNTRY BOUNDING BOXES
+# Format: [lon_min, lon_max, lat_min, lat_max]
+# =============================================================================
+
+COUNTRIES = {
+    # Africa
+    'Algeria': [-9.0, 12.0, 19.0, 37.1],
+    'Angola': [11.7, 24.1, -18.0, -4.4],
+    'Benin': [0.8, 3.9, 6.2, 12.4],
+    'Botswana': [20.0, 29.4, -27.0, -17.8],
+    'Burkina Faso': [-5.5, 2.4, 9.4, 15.1],
+    'Burundi': [29.0, 30.9, -4.5, -2.3],
+    'Cameroon': [8.5, 16.2, 1.7, 13.1],
+    'Central African Republic': [14.4, 27.5, 2.2, 11.0],
+    'Chad': [13.5, 24.0, 7.4, 23.5],
+    'Congo': [11.2, 18.6, -5.0, 3.7],
+    'DR Congo': [12.2, 31.3, -13.5, 5.4],
+    'Djibouti': [41.8, 43.4, 10.9, 12.7],
+    'Egypt': [24.7, 36.9, 22.0, 31.7],
+    'Equatorial Guinea': [9.3, 11.3, 1.0, 2.3],
+    'Eritrea': [36.4, 43.1, 12.4, 18.0],
+    'Eswatini': [30.8, 32.1, -27.3, -25.7],
+    'Ethiopia': [33.0, 48.0, 3.4, 15.0],
+    'Gabon': [8.7, 14.5, -4.0, 2.3],
+    'Gambia': [-16.8, -13.8, 13.1, 13.8],
+    'Ghana': [-3.3, 1.2, 4.7, 11.2],
+    'Guinea': [-15.1, -7.6, 7.2, 12.7],
+    'Guinea-Bissau': [-16.7, -13.6, 10.9, 12.7],
+    'Ivory Coast': [-8.6, -2.5, 4.4, 10.7],
+    'Kenya': [33.9, 42.0, -4.7, 5.5],
+    'Lesotho': [27.0, 29.5, -30.7, -28.6],
+    'Liberia': [-11.5, -7.4, 4.4, 8.6],
+    'Libya': [9.3, 25.2, 19.5, 33.2],
+    'Madagascar': [43.2, 50.5, -25.6, -11.9],
+    'Malawi': [32.7, 35.9, -17.1, -9.4],
+    'Mali': [-12.2, 4.2, 10.2, 25.0],
+    'Mauritania': [-17.1, -4.8, 14.7, 27.3],
+    'Morocco': [-13.2, -1.0, 27.7, 35.9],
+    'Mozambique': [30.2, 40.8, -26.9, -10.5],
+    'Namibia': [11.7, 25.3, -29.0, -17.0],
+    'Niger': [0.2, 16.0, 11.7, 23.5],
+    'Nigeria': [2.7, 14.7, 4.3, 13.9],
+    'Rwanda': [29.0, 30.9, -2.8, -1.1],
+    'Senegal': [-17.5, -11.4, 12.3, 16.7],
+    'Sierra Leone': [-13.3, -10.3, 6.9, 10.0],
+    'Somalia': [40.9, 51.4, -1.7, 12.0],
+    'South Africa': [16.5, 33.0, -35.0, -22.1],
+    'South Sudan': [24.1, 35.9, 3.5, 12.2],
+    'Sudan': [21.8, 38.6, 8.7, 22.2],
+    'Tanzania': [29.3, 40.4, -11.7, -1.0],
+    'Togo': [-0.1, 1.8, 6.1, 11.1],
+    'Tunisia': [7.5, 11.6, 30.2, 37.4],
+    'Uganda': [29.6, 35.0, -1.5, 4.2],
+    'Zambia': [22.0, 33.7, -18.1, -8.2],
+    'Zimbabwe': [25.2, 33.1, -22.4, -15.6],
+
+    # Asia
+    'Afghanistan': [60.5, 75.0, 29.4, 38.5],
+    'Armenia': [43.4, 46.6, 38.8, 41.3],
+    'Azerbaijan': [44.8, 50.4, 38.4, 41.9],
+    'Bahrain': [50.4, 50.7, 25.8, 26.3],
+    'Bangladesh': [88.0, 92.7, 20.7, 26.6],
+    'Bhutan': [88.8, 92.1, 26.7, 28.3],
+    'Brunei': [114.0, 115.4, 4.0, 5.1],
+    'Cambodia': [102.3, 107.6, 10.4, 14.7],
+    'China': [73.5, 135.0, 18.2, 53.6],
+    'Cyprus': [32.3, 34.6, 34.6, 35.7],
+    'Georgia': [40.0, 46.7, 41.1, 43.6],
+    'India': [68.2, 97.4, 6.8, 35.5],
+    'Indonesia': [95.0, 141.0, -11.0, 6.1],
+    'Iran': [44.0, 63.3, 25.1, 39.8],
+    'Iraq': [38.8, 48.6, 29.1, 37.4],
+    'Israel': [34.3, 35.9, 29.5, 33.3],
+    'Japan': [122.9, 153.0, 24.0, 45.5],
+    'Jordan': [34.9, 39.3, 29.2, 33.4],
+    'Kazakhstan': [46.5, 87.3, 40.6, 55.4],
+    'Kuwait': [46.6, 48.4, 28.5, 30.1],
+    'Kyrgyzstan': [69.3, 80.3, 39.2, 43.3],
+    'Laos': [100.1, 107.7, 13.9, 22.5],
+    'Lebanon': [35.1, 36.6, 33.1, 34.7],
+    'Malaysia': [99.6, 119.3, 0.9, 7.4],
+    'Maldives': [72.7, 73.8, -0.7, 7.1],
+    'Mongolia': [87.8, 120.0, 41.6, 52.2],
+    'Myanmar': [92.2, 101.2, 9.8, 28.5],
+    'Nepal': [80.1, 88.2, 26.4, 30.4],
+    'North Korea': [124.3, 130.7, 37.7, 43.0],
+    'Oman': [52.0, 59.8, 16.7, 26.4],
+    'Pakistan': [60.9, 77.8, 23.7, 37.1],
+    'Palestine': [34.2, 35.6, 31.2, 32.6],
+    'Philippines': [116.9, 126.6, 4.6, 21.1],
+    'Qatar': [50.8, 51.6, 24.5, 26.2],
+    'Saudi Arabia': [34.6, 55.7, 16.4, 32.2],
+    'Singapore': [103.6, 104.0, 1.2, 1.5],
+    'South Korea': [125.1, 129.6, 33.1, 38.6],
+    'Sri Lanka': [79.7, 81.9, 5.9, 9.8],
+    'Syria': [35.7, 42.4, 32.3, 37.3],
+    'Taiwan': [120.0, 122.0, 21.9, 25.3],
+    'Tajikistan': [67.4, 75.1, 36.7, 41.0],
+    'Thailand': [97.3, 105.6, 5.6, 20.5],
+    'Timor-Leste': [124.0, 127.3, -9.5, -8.1],
+    'Turkey': [26.0, 45.0, 36.0, 42.1],
+    'Turkmenistan': [52.4, 66.7, 35.1, 42.8],
+    'United Arab Emirates': [51.6, 56.4, 22.6, 26.1],
+    'Uzbekistan': [56.0, 73.1, 37.2, 45.6],
+    'Vietnam': [102.1, 109.5, 8.6, 23.4],
+    'Yemen': [42.6, 54.5, 12.1, 19.0],
+
+    # Europe
+    'Albania': [19.3, 21.1, 39.6, 42.7],
+    'Andorra': [1.4, 1.8, 42.4, 42.7],
+    'Austria': [9.5, 17.2, 46.4, 49.0],
+    'Belarus': [23.2, 32.8, 51.3, 56.2],
+    'Belgium': [2.5, 6.4, 49.5, 51.5],
+    'Bosnia and Herzegovina': [15.7, 19.6, 42.6, 45.3],
+    'Bulgaria': [22.4, 28.6, 41.2, 44.2],
+    'Croatia': [13.5, 19.4, 42.4, 46.5],
+    'Czech Republic': [12.1, 18.9, 48.6, 51.1],
+    'Denmark': [8.1, 15.2, 54.6, 57.8],
+    'Estonia': [21.8, 28.2, 57.5, 59.7],
+    'Finland': [20.6, 31.6, 59.8, 70.1],
+    'France': [-5.1, 9.6, 41.3, 51.1],
+    'Germany': [5.9, 15.0, 47.3, 55.1],
+    'Greece': [19.4, 29.6, 34.8, 41.7],
+    'Hungary': [16.1, 22.9, 45.7, 48.6],
+    'Iceland': [-24.5, -13.5, 63.4, 66.5],
+    'Ireland': [-10.5, -6.0, 51.4, 55.4],
+    'Italy': [6.6, 18.5, 36.6, 47.1],
+    'Kosovo': [20.0, 21.8, 41.9, 43.3],
+    'Latvia': [21.0, 28.2, 55.7, 58.1],
+    'Liechtenstein': [9.5, 9.6, 47.0, 47.3],
+    'Lithuania': [21.0, 26.8, 53.9, 56.5],
+    'Luxembourg': [5.7, 6.5, 49.4, 50.2],
+    'Malta': [14.2, 14.6, 35.8, 36.1],
+    'Moldova': [26.6, 30.2, 45.5, 48.5],
+    'Monaco': [7.4, 7.4, 43.7, 43.8],
+    'Montenegro': [18.5, 20.4, 41.9, 43.6],
+    'Netherlands': [3.4, 7.2, 50.8, 53.5],
+    'North Macedonia': [20.5, 23.0, 40.9, 42.4],
+    'Norway': [4.6, 31.1, 58.0, 71.2],
+    'Poland': [14.1, 24.2, 49.0, 54.8],
+    'Portugal': [-9.5, -6.2, 36.9, 42.2],
+    'Romania': [20.3, 30.0, 43.6, 48.3],
+    'Russia': [27.0, 180.0, 41.2, 82.0],
+    'San Marino': [12.4, 12.5, 43.9, 44.0],
+    'Serbia': [18.8, 23.0, 42.2, 46.2],
+    'Slovakia': [16.8, 22.6, 47.7, 49.6],
+    'Slovenia': [13.4, 16.6, 45.4, 46.9],
+    'Spain': [-9.3, 4.3, 36.0, 43.8],
+    'Sweden': [11.1, 24.2, 55.3, 69.1],
+    'Switzerland': [6.0, 10.5, 45.8, 47.8],
+    'Ukraine': [22.1, 40.2, 44.4, 52.4],
+    'United Kingdom': [-8.6, 1.8, 49.9, 60.9],
+    'Vatican City': [12.4, 12.5, 41.9, 41.9],
+
+    # North America
+    'Bahamas': [-80.5, -72.7, 20.9, 27.3],
+    'Barbados': [-59.7, -59.4, 13.0, 13.3],
+    'Belize': [-89.2, -87.5, 15.9, 18.5],
+    'Canada': [-141.0, -52.6, 41.7, 83.1],
+    'Costa Rica': [-86.0, -82.6, 8.0, 11.2],
+    'Cuba': [-85.0, -74.1, 19.8, 23.3],
+    'Dominican Republic': [-72.0, -68.3, 17.5, 19.9],
+    'El Salvador': [-90.1, -87.7, 13.2, 14.4],
+    'Guatemala': [-92.2, -88.2, 13.7, 17.8],
+    'Haiti': [-74.5, -71.6, 18.0, 20.1],
+    'Honduras': [-89.4, -83.1, 13.0, 16.5],
+    'Jamaica': [-78.4, -76.2, 17.7, 18.5],
+    'Mexico': [-117.1, -86.7, 14.5, 32.7],
+    'Nicaragua': [-87.7, -83.1, 10.7, 15.0],
+    'Panama': [-83.1, -77.2, 7.2, 9.6],
+    'Puerto Rico': [-67.3, -65.2, 17.9, 18.5],
+    'Trinidad and Tobago': [-61.9, -60.5, 10.0, 10.9],
+    'United States': [-125.0, -66.0, 24.0, 50.0],
+
+    # South America
+    'Argentina': [-73.6, -53.6, -55.1, -21.8],
+    'Bolivia': [-69.6, -57.5, -22.9, -9.7],
+    'Brazil': [-73.9, -34.8, -33.8, 5.3],
+    'Chile': [-75.6, -66.4, -55.9, -17.5],
+    'Colombia': [-79.0, -66.9, -4.2, 12.5],
+    'Ecuador': [-81.1, -75.2, -5.0, 1.5],
+    'Guyana': [-61.4, -56.5, 1.2, 8.6],
+    'Paraguay': [-62.6, -54.3, -27.6, -19.3],
+    'Peru': [-81.4, -68.7, -18.4, -0.0],
+    'Suriname': [-58.1, -54.0, 1.8, 6.0],
+    'Uruguay': [-58.4, -53.1, -35.0, -30.1],
+    'Venezuela': [-73.4, -59.8, 0.6, 12.2],
+
+    # Oceania
+    'Australia': [112.0, 154.0, -44.0, -10.0],
+    'Fiji': [177.0, -179.0, -21.0, -12.5],
+    'New Zealand': [166.4, 178.6, -47.3, -34.4],
+    'Papua New Guinea': [141.0, 156.0, -11.7, -1.4],
+    'Solomon Islands': [155.5, 170.2, -12.3, -5.0],
+    'Vanuatu': [166.5, 170.2, -20.3, -13.1],
 }
 
 
@@ -223,7 +422,7 @@ class OpenMeteoClient:
 
     def fetch_grid_data(self, bounds: List[float], resolution: float) -> Dict:
         """
-        Fetch weather data for a grid of points.
+        Fetch weather data for a grid of points with rate limiting.
 
         Args:
             bounds: [lon_min, lon_max, lat_min, lat_max]
@@ -245,13 +444,41 @@ class OpenMeteoClient:
 
         total_points = len(lons) * len(lats)
         print(f"Fetching data for {total_points} grid points...")
+        print(f"Note: Rate limiting applied to avoid API throttling (0.2s between requests)")
 
         count = 0
+        retry_delay = 1.0  # Initial retry delay for 429 errors
+        consecutive_failures = 0
+
         for lat in lats:
             for lon in lons:
-                data = self.fetch_weather_data(lat, lon)
-                if data:
-                    grid_data['data'][(lat, lon)] = data
+                # Rate limiting - wait between requests
+                if count > 0:
+                    time.sleep(0.2)  # 200ms delay between requests (5 req/sec max)
+
+                # Retry logic with exponential backoff
+                max_retries = 3
+                for attempt in range(max_retries):
+                    data = self.fetch_weather_data(lat, lon)
+                    if data:
+                        grid_data['data'][(lat, lon)] = data
+                        consecutive_failures = 0
+                        retry_delay = 1.0  # Reset retry delay on success
+                        break
+                    else:
+                        consecutive_failures += 1
+                        if attempt < max_retries - 1:
+                            # Exponential backoff on failure
+                            wait_time = retry_delay * (2 ** attempt)
+                            print(f"  Retry {attempt + 1}/{max_retries} after {wait_time:.1f}s delay...")
+                            time.sleep(wait_time)
+
+                        # If many consecutive failures, increase base delay
+                        if consecutive_failures >= 5:
+                            print(f"  Multiple failures detected, increasing delay...")
+                            time.sleep(2.0)
+                            consecutive_failures = 0
+
                 count += 1
                 if count % 10 == 0:
                     print(f"  Progress: {count}/{total_points} points")
@@ -1219,6 +1446,9 @@ class WeatherMapGUI:
         self.custom_lon_min = tk.StringVar(value='-125.0')
         self.custom_lon_max = tk.StringVar(value='-65.0')
 
+        # Selected country
+        self.selected_country = None
+
         # Generator
         self.generator = None
 
@@ -1304,6 +1534,7 @@ class WeatherMapGUI:
             ('us', 'United States', 'Continental US'),
             ('australia', 'Australia', 'Full continent'),
             ('europe', 'Europe', 'West to East'),
+            ('country', 'Select Country', 'Choose from list'),
             ('custom', 'Custom Region', 'Define coordinates')
         ]
 
@@ -1320,6 +1551,53 @@ class WeatherMapGUI:
             desc_label = ttk.Label(region_row, text=f"({desc})",
                                     font=('Helvetica', 8), foreground='gray')
             desc_label.pack(side=tk.LEFT, padx=(5, 0))
+
+        # Country selector frame (hidden by default)
+        self.country_frame = ttk.Frame(step1_frame)
+
+        ttk.Separator(self.country_frame, orient='horizontal').pack(fill=tk.X, pady=10)
+
+        country_label = ttk.Label(self.country_frame, text="Select a country:",
+                                   font=('Helvetica', 9, 'italic'))
+        country_label.pack(anchor=tk.W)
+
+        # Country dropdown with search
+        country_search_frame = ttk.Frame(self.country_frame)
+        country_search_frame.pack(fill=tk.X, pady=5)
+
+        ttk.Label(country_search_frame, text="Search:").pack(side=tk.LEFT)
+        self.country_search_var = tk.StringVar()
+        self.country_search_var.trace('w', self._filter_countries)
+        country_search_entry = ttk.Entry(country_search_frame, textvariable=self.country_search_var, width=20)
+        country_search_entry.pack(side=tk.LEFT, padx=5)
+
+        # Country listbox with scrollbar
+        country_list_frame = ttk.Frame(self.country_frame)
+        country_list_frame.pack(fill=tk.X, pady=5)
+
+        country_scrollbar = ttk.Scrollbar(country_list_frame)
+        country_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.country_listbox = tk.Listbox(country_list_frame, height=8,
+                                           yscrollcommand=country_scrollbar.set,
+                                           font=('Helvetica', 9),
+                                           selectbackground='#4ECDC4',
+                                           exportselection=False)
+        self.country_listbox.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        country_scrollbar.config(command=self.country_listbox.yview)
+
+        # Populate country list
+        self.all_countries = sorted(COUNTRIES.keys())
+        for country in self.all_countries:
+            self.country_listbox.insert(tk.END, country)
+
+        # Bind selection event
+        self.country_listbox.bind('<<ListboxSelect>>', self._on_country_select)
+
+        # Selected country display
+        self.selected_country_label = ttk.Label(self.country_frame, text="Selected: None",
+                                                 font=('Helvetica', 9, 'bold'))
+        self.selected_country_label.pack(anchor=tk.W, pady=(5, 0))
 
         # Custom coordinates frame (hidden by default)
         self.custom_coords_frame = ttk.Frame(step1_frame)
@@ -1501,10 +1779,33 @@ class WeatherMapGUI:
 
     def _on_region_change(self):
         """Handle region selection change."""
-        if self.selected_region.get() == 'custom':
+        region = self.selected_region.get()
+
+        # Hide both frames first
+        self.country_frame.pack_forget()
+        self.custom_coords_frame.pack_forget()
+
+        # Show appropriate frame
+        if region == 'country':
+            self.country_frame.pack(fill=tk.X, pady=(5, 0))
+        elif region == 'custom':
             self.custom_coords_frame.pack(fill=tk.X, pady=(5, 0))
-        else:
-            self.custom_coords_frame.pack_forget()
+
+    def _filter_countries(self, *args):
+        """Filter country list based on search text."""
+        search_text = self.country_search_var.get().lower()
+        self.country_listbox.delete(0, tk.END)
+
+        for country in self.all_countries:
+            if search_text in country.lower():
+                self.country_listbox.insert(tk.END, country)
+
+    def _on_country_select(self, event):
+        """Handle country selection from listbox."""
+        selection = self.country_listbox.curselection()
+        if selection:
+            self.selected_country = self.country_listbox.get(selection[0])
+            self.selected_country_label.config(text=f"Selected: {self.selected_country}")
 
     def _set_custom_coords(self, lon_min, lon_max, lat_min, lat_max):
         """Set custom coordinates from preset."""
@@ -1795,8 +2096,44 @@ class WeatherMapGUI:
             # Create generator
             self.generator = WeatherMapGenerator(output_dir=output_dir)
 
-            # Get region config - handle custom region
-            if region == 'custom':
+            # Get region config - handle country and custom regions
+            if region == 'country':
+                if not self.selected_country:
+                    raise ValueError("Please select a country from the list")
+
+                bounds = COUNTRIES[self.selected_country]
+                lon_min, lon_max, lat_min, lat_max = bounds
+
+                # Calculate appropriate grid resolution based on country size
+                lon_range = lon_max - lon_min
+                lat_range = lat_max - lat_min
+                max_range = max(lon_range, lat_range)
+
+                # Adjust resolution to keep API calls reasonable (max ~100 points)
+                if max_range > 30:
+                    grid_res = 2.0
+                elif max_range > 15:
+                    grid_res = 1.5
+                elif max_range > 8:
+                    grid_res = 1.0
+                else:
+                    grid_res = 0.5
+
+                # Calculate center for projection
+                center_lon = (lon_min + lon_max) / 2
+                center_lat = (lat_min + lat_max) / 2
+
+                region_config = {
+                    'name': self.selected_country,
+                    'bounds': bounds,
+                    'grid_resolution': grid_res,
+                    'projection': ccrs.LambertConformal(central_longitude=center_lon, central_latitude=center_lat)
+                }
+                # Add country region to REGIONS temporarily
+                REGIONS['country'] = region_config
+                region = 'country'
+
+            elif region == 'custom':
                 try:
                     lon_min = float(self.custom_lon_min.get())
                     lon_max = float(self.custom_lon_max.get())
@@ -1806,10 +2143,24 @@ class WeatherMapGUI:
                     if lon_min >= lon_max or lat_min >= lat_max:
                         raise ValueError("Invalid coordinates: min must be less than max")
 
+                    # Calculate appropriate grid resolution
+                    lon_range = lon_max - lon_min
+                    lat_range = lat_max - lat_min
+                    max_range = max(lon_range, lat_range)
+
+                    if max_range > 30:
+                        grid_res = 2.0
+                    elif max_range > 15:
+                        grid_res = 1.5
+                    elif max_range > 8:
+                        grid_res = 1.0
+                    else:
+                        grid_res = 0.5
+
                     region_config = {
                         'name': 'Custom Region',
                         'bounds': [lon_min, lon_max, lat_min, lat_max],
-                        'grid_resolution': 1.0,
+                        'grid_resolution': grid_res,
                         'projection': ccrs.PlateCarree()
                     }
                     # Add custom region to REGIONS temporarily
