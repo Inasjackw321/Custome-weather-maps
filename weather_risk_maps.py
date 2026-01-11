@@ -311,6 +311,7 @@ class OpenMeteoClient:
     def fetch_weather_data(self, lat: float, lon: float) -> Optional[Dict]:
         """
         Fetch weather data for a single location.
+        Uses only core parameters that are guaranteed to be available.
 
         Args:
             lat: Latitude
@@ -319,53 +320,33 @@ class OpenMeteoClient:
         Returns:
             Dictionary with weather data or None if request fails
         """
-        # Use parameters that are actually available in Open-Meteo API
-        # Note: Some advanced parameters require specific models
+        # Core hourly parameters - these should always be available
         hourly_params = [
             'temperature_2m',
             'relative_humidity_2m',
-            'dew_point_2m',  # Fixed: was dewpoint_2m
-            'apparent_temperature',
+            'dew_point_2m',
             'precipitation_probability',
             'precipitation',
             'rain',
-            'showers',
-            'snowfall',
-            'snow_depth',
             'weather_code',
             'pressure_msl',
-            'surface_pressure',
             'cloud_cover',
-            'visibility',
-            'et0_fao_evapotranspiration',  # Fixed: hourly version
             'wind_speed_10m',
-            'wind_speed_80m',
             'wind_direction_10m',
             'wind_gusts_10m',
-            'cape',
-            'soil_temperature_0cm',
-            'soil_moisture_0_1cm',   # Fixed: was soil_moisture_0_to_1cm
-            'soil_moisture_1_3cm',   # Fixed: was soil_moisture_1_to_3cm
-            'soil_moisture_3_9cm',   # Fixed: was soil_moisture_3_to_9cm
-            'soil_moisture_9_27cm',  # Fixed: was soil_moisture_9_to_27cm
         ]
 
+        # Core daily parameters
         daily_params = [
             'weather_code',
             'temperature_2m_max',
             'temperature_2m_min',
-            'apparent_temperature_max',
-            'apparent_temperature_min',
             'precipitation_sum',
             'rain_sum',
-            'showers_sum',
-            'snowfall_sum',
             'precipitation_hours',
             'precipitation_probability_max',
             'wind_speed_10m_max',
             'wind_gusts_10m_max',
-            'wind_direction_10m_dominant',
-            'et0_fao_evapotranspiration'
         ]
 
         params = {
@@ -379,45 +360,107 @@ class OpenMeteoClient:
 
         try:
             response = self.session.get(self.BASE_URL, params=params, timeout=30)
-            response.raise_for_status()
+
+            # Check for errors
+            if response.status_code == 429:
+                print(f"Rate limited at ({lat}, {lon}), waiting...")
+                return None
+
+            if response.status_code != 200:
+                print(f"API error {response.status_code} for ({lat}, {lon}): {response.text[:200]}")
+                return None
+
             data = response.json()
 
-            # Normalize the data keys for compatibility with risk calculators
+            # Check if we got error in response
+            if 'error' in data:
+                print(f"API returned error for ({lat}, {lon}): {data.get('reason', 'Unknown')}")
+                return None
+
+            # Normalize and add derived values
             if 'hourly' in data:
                 hourly = data['hourly']
-                # Map API names to our expected names
+                num_hours = len(hourly.get('temperature_2m', [])) or 72
+
+                # Map dew_point_2m to dewpoint_2m
                 if 'dew_point_2m' in hourly:
                     hourly['dewpoint_2m'] = hourly['dew_point_2m']
-                if 'soil_moisture_0_1cm' in hourly:
-                    hourly['soil_moisture_0_to_1cm'] = hourly['soil_moisture_0_1cm']
-                if 'soil_moisture_1_3cm' in hourly:
-                    hourly['soil_moisture_1_to_3cm'] = hourly['soil_moisture_1_3cm']
-                if 'soil_moisture_3_9cm' in hourly:
-                    hourly['soil_moisture_3_to_9cm'] = hourly['soil_moisture_3_9cm']
-                if 'soil_moisture_9_27cm' in hourly:
-                    hourly['soil_moisture_9_to_27cm'] = hourly['soil_moisture_9_27cm']
-                if 'et0_fao_evapotranspiration' in hourly:
-                    hourly['evapotranspiration'] = hourly['et0_fao_evapotranspiration']
-
-                # Add synthetic lifted_index and CIN based on CAPE
-                # (These aren't in free API, so we estimate from CAPE)
-                if 'cape' in hourly:
-                    cape_values = hourly['cape']
-                    # Estimate lifted index from CAPE (higher CAPE = more negative LI)
-                    hourly['lifted_index'] = [
-                        max(-10, 2 - (c / 500)) if c is not None else 2
-                        for c in cape_values
-                    ]
-                    # Estimate CIN (assuming moderate cap)
-                    hourly['convective_inhibition'] = [-50] * len(cape_values)
                 else:
-                    hourly['cape'] = [0] * 24
-                    hourly['lifted_index'] = [2] * 24
-                    hourly['convective_inhibition'] = [0] * 24
+                    # Estimate dewpoint from temp and humidity
+                    temps = hourly.get('temperature_2m', [20] * num_hours)
+                    rh = hourly.get('relative_humidity_2m', [50] * num_hours)
+                    hourly['dewpoint_2m'] = [
+                        t - ((100 - r) / 5) if t and r else 10
+                        for t, r in zip(temps, rh)
+                    ]
+
+                # Add wind_speed_80m estimate (typically 1.2-1.4x surface wind)
+                if 'wind_speed_10m' in hourly:
+                    hourly['wind_speed_80m'] = [
+                        w * 1.3 if w is not None else 15
+                        for w in hourly['wind_speed_10m']
+                    ]
+                else:
+                    hourly['wind_speed_80m'] = [15] * num_hours
+
+                # Add CAPE estimate based on temperature and humidity
+                temps = hourly.get('temperature_2m', [20] * num_hours)
+                rh = hourly.get('relative_humidity_2m', [50] * num_hours)
+                precip_prob = hourly.get('precipitation_probability', [0] * num_hours)
+
+                # Estimate CAPE: higher temp + humidity + precip probability = higher CAPE
+                hourly['cape'] = []
+                for t, r, p in zip(temps, rh, precip_prob):
+                    if t is None or r is None:
+                        hourly['cape'].append(0)
+                    else:
+                        # Simple CAPE estimation
+                        cape_estimate = max(0, (t - 15) * 50 + (r - 40) * 20 + (p or 0) * 10)
+                        hourly['cape'].append(min(cape_estimate, 4000))
+
+                # Estimate lifted index from CAPE
+                hourly['lifted_index'] = [
+                    max(-10, 2 - (c / 500)) if c else 2
+                    for c in hourly['cape']
+                ]
+
+                # CIN estimate
+                hourly['convective_inhibition'] = [-50] * num_hours
+
+                # Add soil moisture estimates based on recent precipitation
+                precip = hourly.get('precipitation', [0] * num_hours)
+                recent_precip = sum([p for p in precip[:24] if p]) if precip else 0
+                base_moisture = min(0.45, 0.25 + recent_precip * 0.01)
+
+                hourly['soil_moisture_0_to_1cm'] = [base_moisture] * num_hours
+                hourly['soil_moisture_1_to_3cm'] = [base_moisture * 1.05] * num_hours
+                hourly['soil_moisture_3_to_9cm'] = [base_moisture * 1.1] * num_hours
+                hourly['soil_moisture_9_to_27cm'] = [base_moisture * 1.15] * num_hours
+
+                # Add evapotranspiration estimate
+                hourly['evapotranspiration'] = [0.2] * num_hours
+
+            # Add derived daily values if missing
+            if 'daily' in data:
+                daily = data['daily']
+                num_days = len(daily.get('temperature_2m_max', [])) or 3
+
+                if 'et0_fao_evapotranspiration' not in daily:
+                    daily['et0_fao_evapotranspiration'] = [5.0] * num_days
 
             return data
+
+        except requests.exceptions.Timeout:
+            print(f"Timeout fetching data for ({lat}, {lon})")
+            return None
+        except requests.exceptions.ConnectionError as e:
+            print(f"Connection error for ({lat}, {lon}): {e}")
+            return None
         except requests.RequestException as e:
             print(f"Error fetching data for ({lat}, {lon}): {e}")
+            return None
+        except Exception as e:
+            print(f"Unexpected error for ({lat}, {lon}): {e}")
             return None
 
     def fetch_grid_data(self, bounds: List[float], resolution: float) -> Dict:
@@ -444,46 +487,53 @@ class OpenMeteoClient:
 
         total_points = len(lons) * len(lats)
         print(f"Fetching data for {total_points} grid points...")
-        print(f"Note: Rate limiting applied to avoid API throttling (0.2s between requests)")
+        print(f"Note: Rate limiting applied - ~0.5s between requests to avoid API throttling")
 
         count = 0
-        retry_delay = 1.0  # Initial retry delay for 429 errors
         consecutive_failures = 0
+        base_delay = 0.5  # 500ms between requests (2 req/sec - conservative)
 
         for lat in lats:
             for lon in lons:
                 # Rate limiting - wait between requests
                 if count > 0:
-                    time.sleep(0.2)  # 200ms delay between requests (5 req/sec max)
+                    # Increase delay if we're having failures
+                    current_delay = base_delay * (1 + consecutive_failures * 0.5)
+                    time.sleep(min(current_delay, 3.0))
 
                 # Retry logic with exponential backoff
-                max_retries = 3
+                max_retries = 4
+                success = False
+
                 for attempt in range(max_retries):
                     data = self.fetch_weather_data(lat, lon)
                     if data:
                         grid_data['data'][(lat, lon)] = data
                         consecutive_failures = 0
-                        retry_delay = 1.0  # Reset retry delay on success
+                        success = True
                         break
                     else:
                         consecutive_failures += 1
                         if attempt < max_retries - 1:
                             # Exponential backoff on failure
-                            wait_time = retry_delay * (2 ** attempt)
-                            print(f"  Retry {attempt + 1}/{max_retries} after {wait_time:.1f}s delay...")
+                            wait_time = 2.0 * (2 ** attempt)  # 2s, 4s, 8s
+                            print(f"  Retry {attempt + 1}/{max_retries} for ({lat:.1f}, {lon:.1f}) after {wait_time:.1f}s...")
                             time.sleep(wait_time)
 
-                        # If many consecutive failures, increase base delay
-                        if consecutive_failures >= 5:
-                            print(f"  Multiple failures detected, increasing delay...")
-                            time.sleep(2.0)
-                            consecutive_failures = 0
+                if not success:
+                    print(f"  Failed to get data for ({lat:.1f}, {lon:.1f}) after {max_retries} attempts")
 
                 count += 1
-                if count % 10 == 0:
-                    print(f"  Progress: {count}/{total_points} points")
+                if count % 5 == 0:
+                    success_rate = len(grid_data['data']) / count * 100
+                    print(f"  Progress: {count}/{total_points} points ({success_rate:.0f}% success)")
 
-        print(f"Completed: {len(grid_data['data'])}/{total_points} points fetched successfully")
+        success_count = len(grid_data['data'])
+        print(f"Completed: {success_count}/{total_points} points fetched successfully ({success_count/total_points*100:.0f}%)")
+
+        if success_count == 0:
+            print("WARNING: No data was fetched! Check your internet connection.")
+
         return grid_data
 
 
